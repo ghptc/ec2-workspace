@@ -18,20 +18,44 @@ and GNU coreutils/flock. SSH uses `~/.ssh/config`, alias `aws-prod`, batch mode
 and strict host-key verification. Trust the host key before running commands.
 System SSH includes are bypassed without changing them.
 
-Homolog fetches `origin/master` from [ghptc/cod4x-server](https://github.com/ghptc/cod4x-server)
-into a clean isolated checkout under ignored `.state/`. It compiles locally,
-runs the engine integrity/policy tests, and packages a Docker image. The pinned
-builder and runtime base image IDs in `scripts/common.sh` must already exist
-locally. Nothing is compiled or installed on EC2.
+Homolog fetches `origin/master` from both canonical repositories,
+[engine](https://github.com/ghptc/cod4x-server) and
+[configuration](https://github.com/ghptc/cod4-promod-server), into clean detached
+checkouts under ignored `.state/`. Engine and configuration SHAs, pinned Bot Warfare
+revision and dependency lock are recorded with the immutable image identity.
+Python 3.11+ and GCC run integrity validation on the local host; the pinned builder
+needs no Python. Compilation and C policy checks remain in the builder.
 
-Promod LIVE 2.20 assets and integrity headers are hash-verified against that
-commit's `bots/dependencies.json`. Defaults are the existing sibling installation:
-`../cod4-promod-server/game/mods/pml220` and
-`../cod4-promod-server/artifacts/integrity/addiwdheaders`. Override with
-`COD4_PROMOD_ASSETS` and `COD4_INTEGRITY_HEADERS`; use assets you are entitled to host.
-[Bot Warfare](https://github.com/ineedbots/iw3_bot_warfare) is fetched at its
-separately locked commit. Image labels record source revisions and the dependency
-lock hash; `/opt/cod4-artifact/inputs.json` records verified asset/binary hashes.
+Provide explicit authorized inputs; there are no historical workspace defaults:
+
+```bash
+export COD4_PROMOD_ASSETS=/private/authorized/pml220
+export COD4_INTEGRITY_HEADERS=/private/authorized/addiwdheaders
+export COD4_OAT=/private/oat-v0.34.0
+COD4_PREPARE_ONLY=1 ./scripts/deploy-homolog.sh promod
+```
+
+This command builds and validates locally, records `.state/prepared`, and never
+contacts EC2. It does not approve production. Without `COD4_PREPARE_ONLY=1`, the
+existing homolog deployment and approval mechanism runs after local preparation.
+The pinned builder/runtime image IDs in `scripts/common.sh` must exist locally.
+Missing inputs fail closed before compilation. Assets and headers are verified
+against the engine dependency lock; Bot Warfare is fetched at its locked SHA.
+The upstream FPS tool verifies official OpenAssetTools v0.34.0 hashes, rebuilds
+and reparses the 40–333 menu, and records the derived fastfile hash. Its manifest
+and editable menu sources accompany the private runtime. No proprietary assets
+or generated files belong in Git or public registries. Graphical client FPS and
+movement qualification remains required before approval.
+
+Canonical `config/promod.cfg` is packaged as `canonical-promod.cfg` within the
+mod VFS and executed before inherited runtime arguments/private configuration.
+Private settings retain precedence; no private configuration file is overwritten.
+The canonical policy is `match_mr12_pb`, with pure enabled. The merged optional
+PunkBuster warning overlay is deliberately not enabled: missing native PB retains
+its warning and requires operator qualification, not an anticheat bypass.
+`inputs.json` records binary, configuration, dependency and FPS provenance; image
+labels and the approval record include both source revisions. Production reuses
+that identity without fetching or rebuilding.
 
 After startup and UDP 28962 checks, homolog requests interactive approval and
 records the exact image ID/references in private `.state/approved`. Production
@@ -114,3 +138,52 @@ cd ~/Projects/ec2-workspace
 
 Do not run `off` first: deployment requires a running rollback baseline.
 There is no deployment on PR merge. The owner supervises the first rollout.
+
+## Local image qualification (2026-10-25)
+
+Built from clean isolated canonical checkouts, with the pinned Bot Warfare source:
+
+| Input | Revision / SHA-256 |
+| --- | --- |
+| Engine master | `8bc5f3ed2c750b199bb084de350ef1cf2687eb9d` |
+| Promod configuration master | `190c715a449fa4354ecf1c49bc8d51e0a0cfa1a0` |
+| Bot Warfare | `7b52b462e40fa68287b9e54602e52da83b17766c` |
+| Compiled ELF32/i386 engine | `d10a3c56691bd662fcbd443a4ccc3d51e1abc61d2c33538758ec5112522e0b7c` |
+| Canonical configuration content | `21344b5d93b1ea246d20513d35351f152af97e68153500bb42b5b9e5cfb09b56` |
+| Rebuilt 333 FPS fastfile | `f9c19687061403fbaaf44d4c90d8832392a3bc32f51211e6a1408c90c9ce80c2` |
+
+Local private runtime image:
+`sha256:ecf0dcb5a4152a4f9fba4e33f244fc459ba5ec282b12e4c49457b14f5bddf30a`.
+Docker 29.9.2 built and inspected this identity. Extraction verified its revision
+labels, binary/configuration hashes, two unchanged Promod IWDs, all eight integrity
+headers and FPS manifest. Official OAT v0.34.0 executable hashes matched the
+upstream tool's pins; its reparsing/inventory checks compared 141 extracted assets,
+changing only the two FPS menus and adding their required menu-list containers.
+
+Authorized Promod assets/headers came from the explicitly supplied sibling paths;
+game data came from the owner's Steam installation. All 21 Steam IWD archives
+passed CRC validation. The packaged entrypoint loaded Crash and the canonical
+`match_mr12_pb` configuration, reported `sv_pure=1`, loaded eight administrative
+checksums and exited cleanly. Game data was mounted read-only in disposable,
+network-isolated containers, outside the image. No obsolete PoC directory was
+used. Existing remote game-data mounts remain required.
+
+The Bash syntax, ShellCheck, operations suite, integrity loader tests (6), FPS
+policy tests (3), PunkBuster warning-policy tests (3) and native bot-policy tests
+passed. Runtime scenarios passed: administration/controls (117 s), gameplay
+(45 s), admission policy (75 s), active rotation (135 s), six-client burst (30 s),
+legacy admission (30 s), missing waypoints (30 s), and all 21 map wrappers with
+zero bots (240 s). Runtime checks retained pure and all eight headers. Private
+build logs, manifests and per-scenario acceptance evidence remain under ignored
+`.state/qualification.Sq8SSr/`; `.state/prepared` records the candidate identity.
+No homolog approval was created.
+
+Remaining qualification: graphical FPS/movement and real-client pure/download,
+reconnect and authentication behavior. The tested build exposes no
+`sv_punkbuster` cvar; native PB protection is unavailable in this build, while the
+canonical PB mode and unsuppressed Promod warning policy remain. A PB-required
+rollout needs that prerequisite resolved. The offline runtime also reports missing
+`steam_api.so`; Steam authentication is unqualified. Existing mbedTLS compiler
+warnings and PIE/text-relocation linker warnings remain. These local checks do not
+authorize deployment. No EC2 access, production/homolog changes, registry upload
+or PR merge occurred.
