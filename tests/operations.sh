@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Local fixtures and mocks only: never contact EC2 or the Docker daemon.
+# Mocked deployment subshells intentionally do not alter parent fixture identities.
+# shellcheck disable=SC2031
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 source scripts/common.sh
@@ -23,7 +25,7 @@ for action in on on off off status; do scripts/homolog.sh "$action"; done
 [[ $(wc -l < "$MOCK_LOG") == 5 ]]
 grep -q 'BatchMode=yes.*StrictHostKeyChecking=yes' "$MOCK_LOG"
 if grep -Eq 'production|bard|compose|create' "$MOCK_LOG"; then exit 1; else [[ $? == 1 ]]; fi
-for script in homolog deploy-homolog deploy-production game-mode; do
+for script in production homolog deploy-homolog deploy-production game-mode; do
     if "scripts/$script.sh" >/dev/null 2>&1; then exit 1; fi
 done
 for script in deploy-homolog deploy-production; do
@@ -32,6 +34,67 @@ done
 if MOCK_SSH_EXIT=255 scripts/homolog.sh status >/dev/null 2>&1; then exit 1; fi
 if (confirm 'Production test') </dev/null >/dev/null 2>&1; then exit 1; fi
 printf 'PASS: command boundaries, lifecycle repetition/isolation, SSH options/failure, terminal requirement\n'
+
+mkdir "$test_root/lifecycle"
+cp scripts/common.sh scripts/production.sh "$test_root/lifecycle/"
+cat >> "$test_root/lifecycle/common.sh" <<'MOCK'
+remote() {
+    printf '%s\n' "$*" >> "$MOCK_LOG"
+    case "$1 $2" in
+        'docker inspect')
+            if [[ "$*" == *'configured_image='* ]]; then
+                printf 'cod4-production running=%s image=sha256:fixture\n' "$(cat "$MOCK_STATE")"
+            else cat "$MOCK_STATE"; fi ;;
+        'docker start') printf true > "$MOCK_STATE" ;;
+        'docker stop') printf false > "$MOCK_STATE" ;;
+        *) return 1 ;;
+    esac
+}
+confirm() { printf 'confirm disconnect players\n' >> "$MOCK_LOG"; [[ ${MOCK_APPROVE:-no} == yes ]]; }
+MOCK
+export MOCK_STATE="$test_root/lifecycle-state"
+printf false > "$MOCK_STATE"
+: > "$MOCK_LOG"
+for action in on on; do "$test_root/lifecycle/production.sh" "$action"; done
+[[ $(cat "$MOCK_STATE") == true && $(grep -c 'docker start' "$MOCK_LOG") == 1 ]]
+if "$test_root/lifecycle/production.sh" off >/dev/null 2>&1; then exit 1; fi
+[[ $(cat "$MOCK_STATE") == true ]]
+if grep -q 'docker stop' "$MOCK_LOG"; then exit 1; fi
+MOCK_APPROVE=yes "$test_root/lifecycle/production.sh" off
+"$test_root/lifecycle/production.sh" off
+[[ $(cat "$MOCK_STATE") == false && $(grep -c 'docker stop' "$MOCK_LOG") == 1 ]]
+[[ $(grep -c 'confirm disconnect players' "$MOCK_LOG") == 2 ]]
+[[ $(tail -1 "$MOCK_LOG") == *'{{.State.Running}} cod4-production' ]]
+"$test_root/lifecycle/production.sh" status > "$test_root/status"
+grep -q 'running=false image=sha256:fixture' "$test_root/status"
+if grep -Eq 'homolog|bard|compose|build|docker rm|volume' "$MOCK_LOG"; then exit 1; fi
+printf 'PASS: production lifecycle, state idempotency, shutdown confirmation, status image and isolation\n'
+
+# Execute the real health payload locally, mocking its Docker/UDP commands only.
+mkdir "$test_root/health-bin"
+cat > "$test_root/health-bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+printf 'true none\n'
+MOCK
+cat > "$test_root/health-bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+printf 'statusResponse\n\\fs_game\\%s\\mapname\\mp_crash\n' "$MOCK_HEALTH_MODE"
+MOCK
+cat > "$test_root/health-bin/sleep" <<'MOCK'
+#!/usr/bin/env bash
+exit 1
+MOCK
+chmod +x "$test_root/health-bin/"*
+(
+    export PATH="$test_root/health-bin:$PATH"
+    remote() { "$@"; }
+    select_environment production
+    export MOCK_HEALTH_MODE=mods/pml220
+    check_health mods/pml220
+    export MOCK_HEALTH_MODE=mods/other
+    if check_health mods/pml220 >/dev/null 2>&1; then exit 1; fi
+)
+printf 'PASS: actual health payload accepts Promod and rejects wrong UDP game mode\n'
 
 mkdir "$test_root/scripts"
 cp scripts/*.sh "$test_root/scripts/"
@@ -144,7 +207,7 @@ grep -q '^engine$' "$stage/.dockerignore"
 printf 'PASS: local build orchestration, build failure gate, recorded image identity, runtime-only packaging\n'
 
 ROOT=$test_root
-mkdir "$ROOT/.state"
+mkdir -p "$ROOT/.state"
 select_environment homolog
 apply_count=0
 remote() {
@@ -153,6 +216,8 @@ remote() {
         'docker version') printf 'linux/amd64\n' ;;
         'docker inspect')
             if [[ "$*" == *'{{.Image}} {{.State.Running}}'* ]]; then printf '%s true\n' "${homolog_id:-$artifact_id}"
+            elif [[ "$*" == 'docker inspect cod4-homolog' ]]; then
+                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s"},"Cmd":["+set","fs_basepath","/opt/cod4-artifact","+set","fs_game","mods/pml220","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision"
             elif [[ "$apply_count" -ge 2 ]]; then printf '%s\n' "$old_id"
             else printf '%s\n' "$artifact_id"; fi ;;
         'docker image') cat >/dev/null; [[ ${fail_ssh:-0} == 0 ]] ;;
@@ -164,9 +229,9 @@ snapshot_runtime() {
     config='{"services":{"'"$service"'":{"entrypoint":["/home/user/cod4/cod4x18_dedrun"],"command":["+set","fs_game","mods/pml220"],"volumes":[{"source":"/persist","target":"/home/user/.callofduty4"},{"source":"/main","target":"/home/user/cod4/main"},{"source":"/zone","target":"/home/user/cod4/zone"}]}}}'
     inspection='[{"Image":"'"$old_id"'"}]'
 }
-apply_runtime() { cat >> "$test_root/applied"; apply_count=$((apply_count+1)); [[ ${fail_apply:-0} == 0 || "$apply_count" -gt 1 ]]; }
-check_health() { [[ ${fail_rollback:-0} == 0 ]] || return 1; [[ ${fail_health:-0} == 0 || "$apply_count" -ge 2 ]]; }
-confirm() { [[ ${decline:-0} == 0 ]]; }
+apply_runtime() { printf 'apply %s\n' "$container" >> "$test_root/remote.log"; cat >> "$test_root/applied"; apply_count=$((apply_count+1)); [[ ${fail_apply:-0} == 0 || "$apply_count" -gt 1 ]]; }
+check_health() { [[ ${2:-} != cod4-homolog ]] || return 0; [[ ${fail_rollback:-0} == 0 ]] || return 1; [[ ${fail_health:-0} == 0 || "$apply_count" -ge 2 ]]; }
+confirm() { printf 'confirm\n' >> "$test_root/remote.log"; [[ ${decline:-0} == 0 ]]; }
 deploy_image "$artifact_id" >/dev/null
 read -r approved approved_revision approved_assets approved_bots < "$ROOT/.state/approved"
 [[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" ]]
@@ -177,8 +242,14 @@ if grep -Eq 'production|bard' "$test_root/remote.log"; then exit 1; else [[ $? =
 select_environment production
 : > "$test_root/remote.log"
 apply_count=0
-deploy_image "$artifact_id" >/dev/null
+deploy_image "$artifact_id" > "$test_root/plan"
 [[ "$apply_count" == 1 ]]
+grep -q 'container=cod4-production.*UDP=28960 mode=promod' "$test_root/plan"
+grep -q "Approved image: $artifact_id" "$test_root/plan"
+confirmation_line=$(grep -n '^confirm$' "$test_root/remote.log" | cut -d: -f1)
+transfer_line=$(grep -n '^docker image load$' "$test_root/remote.log" | cut -d: -f1)
+apply_line=$(grep -n '^apply cod4-production$' "$test_root/remote.log" | cut -d: -f1)
+[[ "$confirmation_line" -lt "$transfer_line" && "$transfer_line" -lt "$apply_line" ]]
 if grep -Eq '(start|stop|up).*cod4-homolog|bard' "$test_root/remote.log"; then exit 1; else [[ $? == 1 ]]; fi
 apply_count=0; fail_health=1
 if deploy_image "$artifact_id" > "$test_root/result" 2>&1; then exit 1; fi
@@ -189,6 +260,7 @@ if deploy_image "$artifact_id" > "$test_root/result" 2>&1; then exit 1; fi
 fail_apply=0; apply_count=0
 if (fail_rollback=1; deploy_image "$artifact_id") > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'ROLLBACK FAILED' "$test_root/result"
+if (homolog_path=/home/user/cod4/cod4x18_dedrun; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
 for failure in fail_ssh fail_save decline missing_image; do
     if (export "$failure=1"; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
 done
@@ -205,9 +277,13 @@ deploy promod >/dev/null
 printf newer > "$test_root/source/newer"
 command git -C "$test_root/source" add newer
 command git -C "$test_root/source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: newer master'
+resolve_master() { printf forbidden > "$test_root/fetched"; return 1; }
+deploy promod > "$test_root/result" 2>&1
+[[ $(cat "$test_root/promoted") == "$artifact_id" && ! -e "$test_root/fetched" ]]
+printf 'unapproved image\n' > "$ROOT/.state/approved"
 if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
-grep -q 'Latest master is' "$test_root/result"
+grep -q 'Malformed approval record' "$test_root/result"
 rm "$ROOT/.state/approved"
 if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'No approved homolog artifact' "$test_root/result"
-printf 'PASS: exact production promotion without rebuild, newer-master rejection and untested-artifact rejection\n'
+printf 'PASS: exact production promotion without rebuild, promotion despite newer master and untested-artifact rejection\n'
