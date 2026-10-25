@@ -1,0 +1,7 @@
+.state/
+.env
+.env.*
+*.pem
+*.key
+.aws/
+.ssh/
