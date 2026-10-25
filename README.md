@@ -18,20 +18,44 @@ and GNU coreutils/flock. SSH uses `~/.ssh/config`, alias `aws-prod`, batch mode
 and strict host-key verification. Trust the host key before running commands.
 System SSH includes are bypassed without changing them.
 
-Homolog fetches `origin/master` from [ghptc/cod4x-server](https://github.com/ghptc/cod4x-server)
-into a clean isolated checkout under ignored `.state/`. It compiles locally,
-runs the engine integrity/policy tests, and packages a Docker image. The pinned
-builder and runtime base image IDs in `scripts/common.sh` must already exist
-locally. Nothing is compiled or installed on EC2.
+Homolog fetches `origin/master` from both canonical repositories,
+[engine](https://github.com/ghptc/cod4x-server) and
+[configuration](https://github.com/ghptc/cod4-promod-server), into clean detached
+checkouts under ignored `.state/`. Engine and configuration SHAs, pinned Bot Warfare
+revision and dependency lock are recorded with the immutable image identity.
+Python 3.11+ and GCC run integrity validation on the local host; the pinned builder
+needs no Python. Compilation and C policy checks remain in the builder.
 
-Promod LIVE 2.20 assets and integrity headers are hash-verified against that
-commit's `bots/dependencies.json`. Defaults are the existing sibling installation:
-`../cod4-promod-server/game/mods/pml220` and
-`../cod4-promod-server/artifacts/integrity/addiwdheaders`. Override with
-`COD4_PROMOD_ASSETS` and `COD4_INTEGRITY_HEADERS`; use assets you are entitled to host.
-[Bot Warfare](https://github.com/ineedbots/iw3_bot_warfare) is fetched at its
-separately locked commit. Image labels record source revisions and the dependency
-lock hash; `/opt/cod4-artifact/inputs.json` records verified asset/binary hashes.
+Provide explicit authorized inputs; there are no historical workspace defaults:
+
+```bash
+export COD4_PROMOD_ASSETS=/private/authorized/pml220
+export COD4_INTEGRITY_HEADERS=/private/authorized/addiwdheaders
+export COD4_OAT=/private/oat-v0.34.0
+COD4_PREPARE_ONLY=1 ./scripts/deploy-homolog.sh promod
+```
+
+This command builds and validates locally, records `.state/prepared`, and never
+contacts EC2. It does not approve production. Without `COD4_PREPARE_ONLY=1`, the
+existing homolog deployment and approval mechanism runs after local preparation.
+The pinned builder/runtime image IDs in `scripts/common.sh` must exist locally.
+Missing inputs fail closed before compilation. Assets and headers are verified
+against the engine dependency lock; Bot Warfare is fetched at its locked SHA.
+The upstream FPS tool verifies official OpenAssetTools v0.34.0 hashes, rebuilds
+and reparses the 40–333 menu, and records the derived fastfile hash. Its manifest
+and editable menu sources accompany the private runtime. No proprietary assets
+or generated files belong in Git or public registries. Graphical client FPS and
+movement qualification remains required before approval.
+
+Canonical `config/promod.cfg` is packaged as `canonical-promod.cfg` within the
+mod VFS and executed before inherited runtime arguments/private configuration.
+Private settings retain precedence; no private configuration file is overwritten.
+The canonical policy is `match_mr12_pb`, with pure enabled. The merged optional
+PunkBuster warning overlay is deliberately not enabled: missing native PB retains
+its warning and requires operator qualification, not an anticheat bypass.
+`inputs.json` records binary, configuration, dependency and FPS provenance; image
+labels and the approval record include both source revisions. Production reuses
+that identity without fetching or rebuilding.
 
 After startup and UDP 28962 checks, homolog requests interactive approval and
 records the exact image ID/references in private `.state/approved`. Production

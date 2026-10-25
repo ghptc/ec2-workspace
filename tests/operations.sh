@@ -157,16 +157,25 @@ cat > "$test_root/source/tools/bots/prepare.py" <<'PY'
 import argparse,pathlib
 p=argparse.ArgumentParser()
 for key in ('promod','bot-warfare','headers','binary','output'): p.add_argument('--'+key,required=True)
-a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture')
+a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture'); (out/'mods/pml220').mkdir(parents=True); (out/'inputs.json').write_text('{}')
 PY
 git -C "$test_root/source" add bots tools docs License.md Copyright.md copying.md
 git -C "$test_root/source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: fixture'
 expected=$(git -C "$test_root/source" rev-parse HEAD)
 printf uncommitted > "$test_root/source/dirty"
+mkdir -p "$test_root/config-source/config"
+command git init -q -b master "$test_root/config-source"
+printf 'set sv_pure "1"\n' > "$test_root/config-source/config/promod.cfg"
+command git -C "$test_root/config-source" add config
+command git -C "$test_root/config-source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: config'
+PROMOD_REPOSITORY="$test_root/config-source"
+expected_promod=$(command git -C "$PROMOD_REPOSITORY" rev-parse HEAD)
 ENGINE_REPOSITORY="$test_root/source"
 stage="$test_root/resolution"
 mkdir "$stage"
 resolve_master
+[[ "$promod_revision" == "$expected_promod" ]]
+[[ -z "$(git -C "$stage/promod" status --porcelain)" ]]
 [[ "$revision" == "$expected" && ! -e "$stage/engine/dirty" ]]
 [[ -z "$(git -C "$stage/engine" status --porcelain)" ]]
 [[ $(cat "$test_root/source/dirty") == uncommitted ]]
@@ -174,13 +183,42 @@ if bash -c 'source scripts/common.sh; ENGINE_REPOSITORY=$1; stage=$2; mkdir "$st
 grep -q 'Cannot fetch origin/master' "$test_root/result"
 printf 'PASS: real local master fetch, exact SHA, isolated clean checkout, developer changes preserved, fetch failure\n'
 
+if (COD4_PROMOD_ASSETS=; build_promod) > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Explicit authorized' "$test_root/result"
+# Exercise an absent executable using an intentionally empty search path.
+# shellcheck disable=SC2123
+if (PATH=/nonexistent; need python3) > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Required command: python3' "$test_root/result"
+if (COD4_PROMOD_ASSETS="$test_root/assets"; COD4_INTEGRITY_HEADERS="$test_root/headers"; COD4_OAT=; build_promod) > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'COD4_OAT' "$test_root/result"
 COD4_PROMOD_ASSETS="$test_root/assets"
+COD4_OAT="$test_root/oat"
+mkdir "$COD4_OAT"
+printf '#!/bin/sh\n' > "$COD4_OAT/Linker"
+cp "$COD4_OAT/Linker" "$COD4_OAT/Unlinker"
+chmod +x "$COD4_OAT/"*
+mkdir -p "$stage/engine/tests" "$stage/engine/tools/promod"
+printf 'pass\n' > "$stage/engine/tests/test_integrity_headers.py"
+for policy in fps_menu punkbuster_policy; do
+    printf 'import unittest\nclass Fixture(unittest.TestCase):\n def test_fixture(self): self.assertTrue(True)\n' > "$stage/engine/tests/test_$policy.py"
+done
+cat > "$stage/engine/tools/promod/fps333.py" <<'PYTHON'
+import argparse,pathlib,json,hashlib
+p=argparse.ArgumentParser()
+for key in ('promod','oat','output'): p.add_argument('--'+key)
+a=p.parse_args(); out=pathlib.Path(a.output); (out/'project/zone_out/fps333').mkdir(parents=True)
+(out/'project/raw').mkdir(); (out/'project/raw/menu').write_text('333')
+(out/'project/zone_out/fps333/mod.ff').write_bytes(b'patched333')
+(out/'manifest.json').write_text(json.dumps({'mod_ff_sha256':hashlib.sha256(b'patched333').hexdigest()}))
+PYTHON
 COD4_INTEGRITY_HEADERS="$test_root/headers"
 artifact_id="sha256:$(printf 'a%.0s' {1..64})"
 old_id="sha256:$(printf 'b%.0s' {1..64})"
 git() {
     if [[ "$*" == *'/bots fetch '* ]]; then return 0; fi
     if [[ "$*" == *'/bots -c advice.detachedHead=false checkout '* ]]; then printf notice > "$stage/bots/README.md"; return 0; fi
+    if [[ "$*" == *'/bots rev-parse HEAD' ]]; then printf '%s\n' "$bot_revision"; return 0; fi
+    if [[ "$*" == *'/bots status '* ]]; then return 0; fi
     command git "$@"
 }
 docker() {
@@ -188,7 +226,7 @@ docker() {
     case "$1 $2" in
         'image inspect')
             [[ ${missing_image:-0} == 0 ]] || return 1
-            printf '[{"Id":"%s","Os":"linux","Architecture":"amd64","Config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.source":"%s","io.cod4.assets.lock":"%s","io.cod4.bot-warfare.revision":"%s"}}}]\n' "$artifact_id" "${image_revision_override:-$revision}" "$ENGINE_REPOSITORY" "${asset_ref_override:-$asset_ref}" "$bot_revision" ;;
+            printf '[{"Id":"%s","Os":"linux","Architecture":"amd64","Config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.source":"%s","io.cod4.promod.revision":"%s","io.cod4.assets.lock":"%s","io.cod4.bot-warfare.revision":"%s"}}}]\n' "$artifact_id" "${image_revision_override:-$revision}" "$ENGINE_REPOSITORY" "$promod_revision" "${asset_ref_override:-$asset_ref}" "$bot_revision" ;;
         'image save') [[ ${fail_save:-0} == 0 ]] || return 1; printf image ;;
         'image tag') return 0 ;;
         'run --rm') [[ ${fail_build:-0} == 0 ]] || return 1 ;;
@@ -202,8 +240,25 @@ build_promod >/dev/null
 # The failed build runs in isolation; build_promod above sets the parent artifact.
 # shellcheck disable=SC2031
 [[ "$artifact" == "$artifact_id" ]]
+[[ $(cat "$stage/runtime/mods/pml220/mod.ff") == patched333 ]]
+cmp "$stage/promod/config/promod.cfg" "$stage/runtime/mods/pml220/canonical-promod.cfg"
 grep -q '^COPY runtime/' "$stage/Dockerfile"
 grep -q '^engine$' "$stage/.dockerignore"
+if grep -q 'python3' "$test_root/docker.log"; then exit 1; fi
+# Local-only preparation cannot call the remote deployment path.
+(
+    ROOT="$test_root/local-only"; mkdir -p "$ROOT"
+    select_environment homolog
+    # Fixture assignments intentionally stay within this preparation subshell.
+    # shellcheck disable=SC2030
+    resolve_master() { revision=$expected; promod_revision=$expected_promod; asset_ref=$(printf 'd%.0s' {1..64}); bot_revision=$(printf 'c%.0s' {1..40}); }
+    build_promod() { artifact=$artifact_id; }
+    # shellcheck disable=SC2329
+    remote() { exit 99; }
+    deploy_image() { exit 98; }
+    COD4_PREPARE_ONLY=1 deploy promod
+    [[ -s "$ROOT/.state/prepared" && ! -e "$ROOT/.state/approved" ]]
+)
 printf 'PASS: local build orchestration, build failure gate, recorded image identity, runtime-only packaging\n'
 
 ROOT=$test_root
@@ -217,7 +272,7 @@ remote() {
         'docker inspect')
             if [[ "$*" == *'{{.Image}} {{.State.Running}}'* ]]; then printf '%s true\n' "${homolog_id:-$artifact_id}"
             elif [[ "$*" == 'docker inspect cod4-homolog' ]]; then
-                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s"},"Cmd":["+set","fs_basepath","/opt/cod4-artifact","+set","fs_game","mods/pml220","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision"
+                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s","io.cod4.promod.revision":"%s"},"Cmd":["+exec","canonical-promod.cfg","+set","fs_basepath","/opt/cod4-artifact","+set","fs_game","mods/pml220","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision" "$promod_revision"
             elif [[ "$apply_count" -ge 2 ]]; then printf '%s\n' "$old_id"
             else printf '%s\n' "$artifact_id"; fi ;;
         'docker image') cat >/dev/null; [[ ${fail_ssh:-0} == 0 ]] ;;
@@ -233,8 +288,9 @@ apply_runtime() { printf 'apply %s\n' "$container" >> "$test_root/remote.log"; c
 check_health() { [[ ${2:-} != cod4-homolog ]] || return 0; [[ ${fail_rollback:-0} == 0 ]] || return 1; [[ ${fail_health:-0} == 0 || "$apply_count" -ge 2 ]]; }
 confirm() { printf 'confirm\n' >> "$test_root/remote.log"; [[ ${decline:-0} == 0 ]]; }
 deploy_image "$artifact_id" >/dev/null
-read -r approved approved_revision approved_assets approved_bots < "$ROOT/.state/approved"
-[[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" ]]
+read -r approved approved_revision approved_assets approved_bots approved_promod < "$ROOT/.state/approved"
+[[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" && "$approved_promod" == "$expected_promod" ]]
+grep -q 'canonical-promod.cfg' "$test_root/applied"
 grep -q '/opt/cod4-artifact/cod4x18_dedrun' "$test_root/applied"
 grep -q '"source": "/persist"' "$test_root/applied"
 if grep -Eq 'production|bard' "$test_root/remote.log"; then exit 1; else [[ $? == 1 ]]; fi
