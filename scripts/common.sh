@@ -81,12 +81,14 @@ docker compose --project-directory "$4" -p "$2" -f "$file" up -d --no-deps --pul
 ' bash "$environment" "$project" "$service" "$work"
 }
 check_health() {
-    remote bash -s -- "$container" "$port" <<'REMOTE'
+    remote bash -s -- "${2:-$container}" "${3:-$port}" "${1:-}" <<'REMOTE'
 set -euo pipefail
 for attempt in {1..90}; do
     state=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1")
     if [[ "$state" == 'true healthy' || "$state" == 'true none' ]]; then
-        if timeout 3 bash -c 'exec 3<>/dev/udp/127.0.0.1/"$1"; printf "\377\377\377\377getstatus\n" >&3; dd bs=65535 count=1 <&3 2>/dev/null | LC_ALL=C grep -aq statusResponse' bash "$2"; then exit 0; fi
+        if response=$(timeout 3 bash -c 'exec 3<>/dev/udp/127.0.0.1/"$1"; printf "\377\377\377\377getstatus\n" >&3; dd bs=65535 count=1 <&3 2>/dev/null ' bash "$2"); then
+            if LC_ALL=C grep -aq statusResponse <<< "$response" && { [[ -z "$3" ]] || grep -Fq -- "\\fs_game\\$3\\" <<< "$response"; }; then exit 0; fi
+        fi
     fi
     sleep 2
 done
@@ -118,6 +120,34 @@ if sys.argv[3]=="artifact":
 print(json.dumps(c))
 ' "$service" "$1" "${2:-original}" <<< "$config"
 }
+runtime_mode() {
+    python3 -c '
+import json,sys
+args=json.load(sys.stdin)["services"][sys.argv[1]].get("command",[])
+values=[args[i+2] for i in range(len(args)-2) if args[i:i+2]==["+set","fs_game"]]
+if len(values)!=1: sys.exit("Expected one explicit game mode")
+print(values[0])
+' "$service" <<< "$config"
+}
+verify_homolog() {
+    local evidence
+    evidence=$(remote docker inspect cod4-homolog) || return 1
+    python3 -c '
+import json,sys
+c=json.load(sys.stdin)[0]; labels=c["Config"].get("Labels") or {}
+def require(condition, message):
+    if not condition: sys.exit(message)
+require(c["Name"]=="/cod4-homolog" and c["Image"]==sys.argv[1] and c["State"]["Running"], "Approved homolog image is not running")
+require(labels.get("org.opencontainers.image.revision")==sys.argv[2], "Homolog source revision differs")
+require(c["Path"]=="/opt/cod4-artifact/cod4x18_dedrun", "Homolog must run the packaged artifact")
+require(c["Config"].get("WorkingDir")=="/opt/cod4-artifact", "Unexpected homolog working directory")
+require(not any(m["Destination"]=="/opt" or m["Destination"]=="/" or m["Destination"].startswith("/opt/cod4-artifact") for m in c["Mounts"]), "Homolog mounts shadow the artifact")
+a=c["Config"].get("Cmd") or []
+for key,value in [("fs_basepath","/opt/cod4-artifact"),("fs_game","mods/pml220"),("fs_localizedHeadersPath","/opt/cod4-artifact/integrity")]:
+    require([a[i+2] for i in range(len(a)-2) if a[i:i+2]==["+set",key]]==[value], "Homolog runtime differs: "+key)
+' "$1" "$revision" <<< "$evidence" || { printf 'Homolog artifact provenance failed; nothing deployed\n' >&2; return 1; }
+    check_health mods/pml220 cod4-homolog 28962
+}
 confirm() {
     [[ -t 0 ]] || fail 'Interactive terminal required'
     local answer
@@ -127,32 +157,38 @@ confirm() {
 deploy_image() {
     need docker
     need python3
-    local metadata identity image_revision platform host_platform previous candidate
+    local metadata identity image_revision platform host_platform previous candidate previous_mode
     metadata=$(docker image inspect "$1") || fail "Local image not found: $1"
     identity=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Id"])' <<< "$metadata")
     [[ "$identity" =~ ^sha256:[a-f0-9]{64}$ && "$identity" == "$1" ]] || fail 'Local image identity differs from the recorded artifact'
     image_revision=$(python3 -c 'import json,sys; print((json.load(sys.stdin)[0]["Config"].get("Labels") or {}).get("org.opencontainers.image.revision", ""))' <<< "$metadata")
-    [[ "$image_revision" == "$revision" ]] || fail 'Image revision differs from resolved master'
+    [[ "$image_revision" == "$revision" ]] || fail 'Image revision differs from approved artifact'
     python3 -c 'import json,sys; l=json.load(sys.stdin)[0]["Config"]["Labels"]; (l.get("io.cod4.assets.lock")==sys.argv[1] and l.get("io.cod4.bot-warfare.revision")==sys.argv[2] and l.get("org.opencontainers.image.source")==sys.argv[3]) or sys.exit("Image source/dependency labels differ")' "$asset_ref" "$bot_revision" "$ENGINE_REPOSITORY" <<< "$metadata" || fail 'Image dependency identity mismatch'
     platform=$(python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; print(c["Os"]+"/"+c["Architecture"])' <<< "$metadata")
     host_platform=$(remote docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
     [[ "$platform" == "$host_platform" ]] || fail "Image platform $platform differs from host $host_platform"
     if [[ "$environment" == production ]]; then
         [[ "$(remote docker inspect --format '{{.Image}} {{.State.Running}}' cod4-homolog)" == "$identity true" ]] || fail 'Approved image is no longer running in homolog'
-        confirm "Deploy $identity ($revision) to production?" || return 1
+        verify_homolog "$identity" || return 1
     fi
     snapshot_runtime || return 1
     previous=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Image"])' <<< "$inspection")
     candidate=$(image_config "$identity" artifact) || fail 'Cannot safely adapt this runtime configuration'
+    previous_mode=$(runtime_mode) || return 1
+    if [[ "$environment" == production ]]; then
+        printf 'Production plan: host=aws-prod container=%s project=%s service=%s UDP=%s mode=promod\nPrevious image: %s\nApproved image: %s\nSource revision: %s\nMounts and other runtime settings retained; packaged binary/mods selected. Failure triggers rollback.\n' "$container" "$project" "$service" "$port" "$previous" "$identity" "$revision"
+        confirm 'Recreate cod4-production and disconnect players?' || return 1
+        verify_homolog "$identity" || return 1
+    fi
     # Keep rollback evidence even if this process or SSH is interrupted.
     image_config "$previous" > "$ROOT/.state/rollback-$environment.json"
     # pipefail prevents applying an incomplete image transfer.
     docker image save "$identity" | remote docker image load >/dev/null || fail 'Image transfer failed; runtime was not changed'
-    if apply_runtime <<< "$candidate" && check_health && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
+    if apply_runtime <<< "$candidate" && check_health mods/pml220 && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
         printf 'Deployed %s revision %s to %s\n' "$identity" "$revision" "$environment"
     else
         printf 'Deployment failed for %s. Restoring previous image %s.\n' "$environment" "$previous" >&2
-        if apply_runtime <<< "$(image_config "$previous")" && check_health && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$previous" ]]; then
+        if apply_runtime <<< "$(image_config "$previous")" && check_health "$previous_mode" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$previous" ]]; then
             printf 'Rollback healthy: %s\n' "$previous" >&2
         else
             printf 'ROLLBACK FAILED: inspect %s immediately.\n' "$container" >&2
@@ -222,23 +258,26 @@ DOCKERFILE
     docker run --rm --pull never --network none --read-only --entrypoint /bin/sh "$artifact" \
         -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
 }
+# Deployment resolution intentionally stays inside its operation subshell.
+# shellcheck disable=SC2030
 deploy() (
     [[ $# == 1 && "$1" == promod ]] || fail "Usage: deploy-$environment.sh promod (only supported mode)"
-    for dependency in git docker python3 sha256sum realpath flock; do need "$dependency"; done
+    for dependency in docker python3 flock; do need "$dependency"; done
     umask 077
     mkdir -p -- "$ROOT/.state"
     exec 9> "$ROOT/.state/deploy.lock"
     flock -n 9 || fail 'Another deployment is running in this checkout'
-    stage=$(mktemp -d "$ROOT/.state/build.XXXXXX")
-    trap 'rm -rf -- "$stage"' EXIT
-    resolve_master
     if [[ "$environment" == homolog ]]; then
+        for dependency in git sha256sum realpath; do need "$dependency"; done
+        stage=$(mktemp -d "$ROOT/.state/build.XXXXXX")
+        trap 'rm -rf -- "$stage"' EXIT
+        resolve_master
         build_promod
     else
         [[ -f "$ROOT/.state/approved" ]] || fail 'No approved homolog artifact; deploy homolog first'
-        read -r artifact approved_revision approved_assets approved_bots < "$ROOT/.state/approved"
-        [[ "$approved_revision" == "$revision" ]] || fail "Latest master is $revision; homolog tested $approved_revision. Deploy and approve homolog again."
-        [[ "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" ]] || fail 'Homolog dependency references do not match master'
+        [[ $(wc -l < "$ROOT/.state/approved") == 1 ]] || fail 'Malformed approval record'
+        read -r artifact revision asset_ref bot_revision extra < "$ROOT/.state/approved"
+        [[ -z "$extra" && "$revision" =~ ^[a-f0-9]{40}$ && "$asset_ref" =~ ^[a-f0-9]{64}$ && "$bot_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Malformed approval record'
     fi
     [[ "$artifact" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Invalid artifact image ID'
     deploy_image "$artifact"
