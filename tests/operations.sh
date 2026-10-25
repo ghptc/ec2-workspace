@@ -22,7 +22,7 @@ export PATH="$test_root/bin:$PATH"
 for action in on on off off status; do scripts/homolog.sh "$action"; done
 [[ $(wc -l < "$MOCK_LOG") == 5 ]]
 grep -q 'BatchMode=yes.*StrictHostKeyChecking=yes' "$MOCK_LOG"
-! grep -Eq 'production|bard|compose|create' "$MOCK_LOG"
+if grep -Eq 'production|bard|compose|create' "$MOCK_LOG"; then exit 1; else [[ $? == 1 ]]; fi
 for script in homolog deploy-homolog deploy-production game-mode; do
     if "scripts/$script.sh" >/dev/null 2>&1; then exit 1; fi
 done
@@ -41,29 +41,45 @@ snapshot_runtime() {
     config='{"services":{"'"$service"'":{"command":["+set","fs_game","'"${MOCK_MODE:-mods/pml220}"'"]}}}'
 }
 remote() { printf '%s\n' "$*" >> "$MOCK_LOG"; }
-apply_runtime() { cat >> "$MOCK_LOG"; }
-check_health() { return 0; }
+apply_runtime() {
+    cat >> "$MOCK_LOG"
+    if [[ ${MOCK_FAIL_APPLY:-0} == 1 && ! -e "$MOCK_LOG.failed" ]]; then
+        touch "$MOCK_LOG.failed"
+        return 1
+    fi
+}
+check_health() { [[ ${MOCK_FAIL_HEALTH:-0} == 0 ]]; }
 MOCK
 : > "$MOCK_LOG"
 "$test_root/scripts/game-mode.sh" homolog promod >/dev/null
 [[ ! -s "$MOCK_LOG" ]]
 MOCK_MODE=mods/other "$test_root/scripts/game-mode.sh" production promod >/dev/null
 grep -q 'cod4-production test -d mods/pml220' "$MOCK_LOG"
-! grep -Eq 'homolog|bard' "$MOCK_LOG"
+if grep -Eq 'homolog|bard' "$MOCK_LOG"; then exit 1; else [[ $? == 1 ]]; fi
 for args in 'invalid promod' 'homolog zombies'; do
     read -r -a values <<< "$args"
     if "$test_root/scripts/game-mode.sh" "${values[@]}" >/dev/null 2>&1; then exit 1; fi
 done
+# A failed mode change must restore the original configuration and still fail.
+: > "$MOCK_LOG"
+if MOCK_MODE=mods/other MOCK_FAIL_APPLY=1 "$test_root/scripts/game-mode.sh" homolog promod > "$test_root/result" 2>&1; then exit 1; fi
+[[ $(grep -c '"services"' "$MOCK_LOG") == 2 ]]
+grep -q 'restoring previous configuration' "$test_root/result"
+if MOCK_MODE=mods/other MOCK_FAIL_HEALTH=1 "$test_root/scripts/game-mode.sh" homolog promod > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Mode rollback failed' "$test_root/result"
 # Execute the actual remote configuration payload against a local temporary path.
 remote() {
-    [[ "$1 $2" == 'bash -c' ]]
+    [[ "$1 $2" == 'bash -c' ]] || return 1
     local code=${3//\/opt\/services\/cod4/$test_root}
     bash -c "$code" "${@:4}"
 }
 select_environment homolog
 project=cod4-homolog; service=homolog; work=/opt/services/cod4
+# Literal dollar signs exercise Compose interpolation escaping.
+# shellcheck disable=SC2016
 apply_runtime <<< '{"services":{"homolog":{"environment":{"SECRET":"a$b"}}}}'
 [[ $(stat -c %a "$test_root/.operations-homolog.json") == 600 ]]
+# shellcheck disable=SC2016
 grep -Fq 'a$$b' "$test_root/.operations-homolog.json"
 grep -q -- '--no-deps --pull never --force-recreate homolog' "$MOCK_LOG"
 [[ $(find "$test_root" -maxdepth 1 -name '.operations.*' | wc -l) == 0 ]]
@@ -91,7 +107,7 @@ resolve_master
 [[ "$revision" == "$expected" && ! -e "$stage/engine/dirty" ]]
 [[ -z "$(git -C "$stage/engine" status --porcelain)" ]]
 [[ $(cat "$test_root/source/dirty") == uncommitted ]]
-if (ENGINE_REPOSITORY="$test_root/missing"; stage="$test_root/failed-fetch"; mkdir "$stage"; resolve_master) > "$test_root/result" 2>&1; then exit 1; fi
+if bash -c 'source scripts/common.sh; ENGINE_REPOSITORY=$1; stage=$2; mkdir "$stage"; resolve_master' bash "$test_root/missing" "$test_root/failed-fetch" > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'Cannot fetch origin/master' "$test_root/result"
 printf 'PASS: real local master fetch, exact SHA, isolated clean checkout, developer changes preserved, fetch failure\n'
 
@@ -120,6 +136,8 @@ docker() {
 if (fail_build=1; build_promod) >/dev/null 2>&1; then exit 1; fi
 rm -rf -- "$stage/bots"
 build_promod >/dev/null
+# The failed build runs in isolation; build_promod above sets the parent artifact.
+# shellcheck disable=SC2031
 [[ "$artifact" == "$artifact_id" ]]
 grep -q '^COPY runtime/' "$stage/Dockerfile"
 grep -q '^engine$' "$stage/.dockerignore"
@@ -154,14 +172,14 @@ read -r approved approved_revision approved_assets approved_bots < "$ROOT/.state
 [[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" ]]
 grep -q '/opt/cod4-artifact/cod4x18_dedrun' "$test_root/applied"
 grep -q '"source": "/persist"' "$test_root/applied"
-! grep -Eq 'production|bard' "$test_root/remote.log"
+if grep -Eq 'production|bard' "$test_root/remote.log"; then exit 1; else [[ $? == 1 ]]; fi
 [[ -f "$ROOT/.state/rollback-homolog.json" ]]
 select_environment production
 : > "$test_root/remote.log"
 apply_count=0
 deploy_image "$artifact_id" >/dev/null
 [[ "$apply_count" == 1 ]]
-! grep -Eq '(start|stop|up).*cod4-homolog|bard' "$test_root/remote.log"
+if grep -Eq '(start|stop|up).*cod4-homolog|bard' "$test_root/remote.log"; then exit 1; else [[ $? == 1 ]]; fi
 apply_count=0; fail_health=1
 if deploy_image "$artifact_id" > "$test_root/result" 2>&1; then exit 1; fi
 [[ "$apply_count" == 2 ]]; grep -q 'Rollback healthy' "$test_root/result"

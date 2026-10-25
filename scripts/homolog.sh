@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=scripts/common.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 [[ $# == 1 ]] || fail 'Usage: homolog.sh on|off|status'
 case "$1" in
