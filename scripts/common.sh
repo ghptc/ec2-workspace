@@ -59,6 +59,8 @@ REMOTE
 apply_runtime() {
     # A persistent runtime configuration keeps Compose discovery valid after recreation.
     # Only configuration is written remotely; no deployment scripts are uploaded.
+    # The single-quoted Bash payload expands its arguments on the remote host.
+    # shellcheck disable=SC2016
     python3 -c '
 import json,sys
 def escape(v):

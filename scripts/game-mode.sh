@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=scripts/common.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 [[ $# == 2 ]] || fail 'Usage: game-mode.sh homolog|production promod'
 select_environment "$1"
@@ -23,7 +24,9 @@ fi
 remote docker exec "$container" test -d mods/pml220
 if ! { apply_runtime <<< "$updated" && check_health; }; then
     printf 'Mode change failed; restoring previous configuration\n' >&2
-    apply_runtime <<< "$config" && check_health || fail 'Mode rollback failed; inspect container'
+    if ! { apply_runtime <<< "$config" && check_health; }; then
+        fail 'Mode rollback failed; inspect container'
+    fi
     exit 1
 fi
 printf 'Promod enabled for %s\n' "$environment"
