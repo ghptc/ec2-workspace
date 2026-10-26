@@ -111,6 +111,25 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
     if fs_game == 'mods/pml220' and record.get('bot_readyup_overlay') is True:
         if not (destination / 'promod/readyup.gsx').is_file():
             raise ValueError('Promod bot Ready Up overlay missing')
+    defaults = []
+    if fs_game != 'mods/pml220':
+        if fs_game != 'mods/btd_alpha_001' or record.get('asset_type') != 'btd-alpha-001' or record.get('fs_game') != fs_game:
+            raise ValueError('No verified asset recipe for selected fs_game')
+        assets = record.get('assets', {})
+        required = {'mod.ff', 'btd_images.iwd', 'btd_music.iwd', 'btd_weapons.iwd'}
+        if not required.issubset(assets) or digest(runtime / 'cod4x18_dedrun') != record['binary_sha256']:
+            raise ValueError('Missing BTD assets or engine identity mismatch')
+        for name, expected in assets.items():
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or name in ('.', '..'):
+                raise ValueError('Invalid BTD asset name')
+            path = destination / name
+            if path.is_symlink() or digest(path) != expected:
+                raise ValueError(f'BTD asset identity mismatch: {name}')
+        defaults = record.get('default_cfgs', [])
+        if not defaults or len(defaults) != len(set(defaults)) or any(
+            not re.fullmatch(r'btd_[a-z]+\.cfg', name) or name not in assets for name in defaults
+        ):
+            raise ValueError('Invalid BTD default CFG list')
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / 'shared/server.cfg', destination / 'canonical-shared.cfg')
     shutil.copyfile(root / f'modes/{mode_id}/server.cfg', destination / 'canonical-mode.cfg')
@@ -123,16 +142,25 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
         with (destination / 'canonical-shared.cfg').open('a') as cfg:
             cfg.write('\n// Prepared Promod PB warning policy; authentication unchanged.\n'
                       'set promod_allow_no_punkbuster "1"\n')
+    if defaults:
+        # Original vendor defaults participate in the shared phase. Private
+        # credentials and the final canonical policy still execute afterward.
+        with (destination / 'canonical-shared.cfg').open('a') as cfg:
+            cfg.write('\n// Verified private original BTD defaults.\n')
+            for name in defaults:
+                cfg.write(f'exec {name}\n')
     provenance = runtime / 'configuration'
     provenance.mkdir()
     shutil.copyfile(root / f'modes/{mode_id}/mode.cfg', provenance / 'mode.cfg')
-    fps = json.loads((runtime / 'fps333.json').read_text())
-    if digest(destination / 'mod.ff') != fps['mod_ff_sha256']:
-        raise ValueError('Rebuilt FPS fastfile differs')
+    if fs_game == 'mods/pml220':
+        fps = json.loads((runtime / 'fps333.json').read_text())
+        if digest(destination / 'mod.ff') != fps['mod_ff_sha256']:
+            raise ValueError('Rebuilt FPS fastfile differs')
+        record['fps333'] = fps
     record.update(engine_revision=engine_revision, config_revision=config_revision,
                   bot_revision=bot_revision, mode_id=mode_id, fs_game=fs_game,
                   startup_map=startup_map, config_hash=fingerprint,
-                  config_files=hashes, fps333=fps)
+                  config_files=hashes)
     record_path.write_text(json.dumps(record, indent=2)+'\n')
 
 

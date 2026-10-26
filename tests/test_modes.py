@@ -118,6 +118,45 @@ class CatalogTests(unittest.TestCase):
 class PackagingTests(unittest.TestCase):
     setUp = CatalogTests.setUp
 
+    def test_btd_packaging_and_rejection(self):
+        self.metadata.write_text('set fs_game "mods/btd_alpha_001"\n')
+        for case in ('valid', 'tampered', 'path', 'missing', 'wrong_recipe'):
+            with self.subTest(case=case):
+                output = self.root / case
+                headers = output / 'integrity/addiwdheaders'
+                headers.mkdir(parents=True)
+                names = {'jcod4x_00.dat'} | {f'localized_english_iw{i:02}.dat' for i in range(7)}
+                for name in names:
+                    (headers / name).write_bytes(b'header')
+                mod = output / 'mods/btd_alpha_001'
+                mod.mkdir(parents=True)
+                assets = ('mod.ff', 'btd_images.iwd', 'btd_music.iwd', 'btd_weapons.iwd', 'btd_settings.cfg')
+                for name in assets:
+                    (mod / name).write_bytes(b'private fixture')
+                (output / 'cod4x18_dedrun').write_bytes(b'engine')
+                record = {'maps': ['mp_crash', 'mp_strike'], 'asset_type': 'btd-alpha-001',
+                          'fs_game': 'mods/btd_alpha_001',
+                          'binary_sha256': modes.digest(output / 'cod4x18_dedrun'),
+                          'headers': {n: modes.digest(headers / n) for n in names},
+                          'assets': {n: modes.digest(mod / n) for n in assets},
+                          'default_cfgs': ['btd_settings.cfg']}
+                if case == 'tampered': (mod / 'mod.ff').write_bytes(b'changed')
+                if case == 'path': record['default_cfgs'] = ['../server.cfg']
+                if case == 'missing': record['assets'].pop('btd_weapons.iwd')
+                if case == 'wrong_recipe': record['asset_type'] = 'unknown'
+                (output / 'inputs.json').write_text(json.dumps(record))
+                if case != 'valid':
+                    with self.assertRaises(ValueError):
+                        modes.package(self.root, 'promod', output, 'engine', 'config', 'none')
+                    self.assertFalse((output / 'configuration').exists())
+                    self.assertFalse((mod / 'canonical-mode.cfg').exists())
+                    continue
+                modes.package(self.root, 'promod', output, 'engine', 'config', 'none')
+                self.assertEqual((mod / 'mod.ff').read_bytes(), b'private fixture')
+                self.assertEqual((mod / 'canonical-mode.cfg').read_bytes(), self.server.read_bytes())
+                self.assertTrue((mod / 'canonical-shared.cfg').read_text().endswith('exec btd_settings.cfg\n'))
+                self.assertNotIn('fps333', json.loads((output / 'inputs.json').read_text()))
+
     def test_promod_warning_policy_startup_and_disable(self):
         output = self.root / 'runtime'
         headers = output / 'integrity/addiwdheaders'
