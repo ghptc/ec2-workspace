@@ -45,7 +45,7 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
     args = service.get('command')
     require(isinstance(args, list) and all(isinstance(a, str) for a in args), 'Expected list-form runtime command')
     managed = {'fs_game': fs_game, 'fs_basepath': ARTIFACT_ROOT,
-               'fs_localizedHeadersPath': ARTIFACT_ROOT+'/integrity'}
+               'fs_localizedHeadersPath': ARTIFACT_ROOT+'/integrity', 'sv_autoupdate': '0'}
     seen, private, initial_maps, slots = set(), [], [], []
     i = 0
     while i < len(args):
@@ -63,6 +63,7 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
                 slots.append(value)
             elif key.lower() in {k.lower() for k in managed}:
                 require(key in managed and key not in seen, f'Ambiguous filesystem selection: {key}')
+                require(key != 'sv_autoupdate' or value == '0', 'Managed runtime requires sv_autoupdate=0')
                 seen.add(key)
             elif key.lower() == 'fs_homepath':
                 # The existing persistent home remains separate from the packaged artifact.

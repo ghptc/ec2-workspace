@@ -273,3 +273,30 @@ rollout needs that prerequisite resolved. The offline runtime also reports missi
 warnings and PIE/text-relocation linker warnings remain. These local checks do not
 authorize deployment. No EC2 access, production/homolog changes, registry upload
 or PR merge occurred.
+
+## Immutable engine startup
+
+Managed startup argv now includes `+set sv_autoupdate 0`. This requires an engine
+artifact built from `ghptc/cod4x-server` commit
+`65f1f87` ([engine PR #11](https://github.com/ghptc/cod4x-server/pull/11)), or a later
+revision containing that change. Older binaries accept an unknown cvar without
+disabling the updater, so changing argv alone is insufficient. Build and qualify
+a new immutable artifact through the existing reviewed workflow before use.
+
+The native startup-only option skips server self-updating, preserving crypto,
+authentication, pure verification, game and bot startup. It does not control the
+separate client-update backend. Keep `read_only: true` / `ReadonlyRootfs=true`;
+no writable mount for the updater is needed. Managed argv rejects enabling the
+updater and retains private CFG ordering, canonical mode selection, existing
+mounts, image identity and rollback records.
+
+Local verification: 21 Python fixtures and `bash tests/operations.sh` pass. The
+operations suite uses mocked Docker/SSH and never contacts EC2. Companion engine
+fixtures reproduce EROFS and the lock wait in read-only Docker, then start Promod
+on `mp_crash` with eight integrity headers, `sv_pure=1`, and 12 AI-ready bots when
+disabled. See the engine's `docs/autoupdate.md` for exact evidence and limitations.
+
+Rollback retains the prior image/configuration identity through the existing
+rollback flow; it never edits engine binaries in a running container. A prior
+engine may retain the original read-only updater delay. These changes do not
+authorize deployment or any production/homolog/Bard service action.
