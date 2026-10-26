@@ -2,6 +2,7 @@
 """Fail-closed immutable GitHub Release policy and orchestration (no EC2 access)."""
 import argparse
 from datetime import datetime, timezone
+import fnmatch
 import hashlib
 import json
 import os
@@ -221,20 +222,53 @@ def protected_history(repository, commit, local, tip=False):
     run('git', '-C', str(local), 'fsck', '--full', '--no-dangling')
 
 
+def tag_pattern_matches(pattern, tag):
+    """GitHub ref patterns use pathname matching; * never crosses a slash."""
+    if pattern == '~ALL':
+        return True
+    if not isinstance(pattern, str) or not pattern.startswith('refs/tags/'):
+        return False
+    # Ruby fnmatch uses ^ for negated classes; reject ambiguous escape syntax
+    # rather than silently applying Python's different interpretation.
+    require('\\' not in pattern and '[!' not in pattern, 'Unsupported ruleset pattern syntax')
+    pattern = pattern.replace('[^', '[!')
+    def match(parts, values):
+        if not parts:
+            return not values
+        if parts[0] == '**':
+            return match(parts[1:], values) or bool(values) and match(parts, values[1:])
+        return bool(values) and fnmatch.fnmatchcase(values[0], parts[0]) and match(parts[1:], values[1:])
+    return match(pattern.split('/'), ('refs/tags/' + tag).split('/'))
+
+
 def publication_preflight(tag):
     version(tag)
+    app_id = os.environ.get('RELEASE_APP_ID', '')
+    require(app_id.isdigit() and int(app_id) > 0, 'RELEASE_APP_ID must identify the dedicated release App')
+    actor = {'actor_id': int(app_id), 'actor_type': 'Integration', 'bypass_mode': 'always'}
     require(api(f'repos/{REPO}/immutable-releases').get('enabled') is True, 'Enable immutable releases first')
     require(api('users/ghptc/packages/container/cod4-runtime')['visibility'] == 'private',
             'Pre-provision a PRIVATE cod4-runtime package; never upload licensed assets publicly')
-    protected_tags = False
+    protected = set()
     for summary in pages(f'repos/{REPO}/rulesets'):
         ruleset = api(f'repos/{REPO}/rulesets/{summary["id"]}')
         if ruleset.get('target') != 'tag' or ruleset.get('enforcement') != 'active':
             continue
         refs = ruleset.get('conditions', {}).get('ref_name', {})
-        if 'refs/tags/v*' in refs.get('include', []) and not refs.get('exclude'):
-            protected_tags |= {'creation', 'update', 'deletion'}.issubset({r['type'] for r in ruleset['rules']})
-    require(protected_tags, 'Active creation/update/deletion ruleset for refs/tags/v* required')
+        if not any(tag_pattern_matches(p, tag) for p in refs.get('include', [])) or any(
+                tag_pattern_matches(p, tag) for p in refs.get('exclude', [])):
+            continue
+        rules = {r['type'] for r in ruleset.get('rules', [])}
+        bypass = ruleset.get('bypass_actors', [])
+        if 'creation' in rules:
+            require(bypass == [actor], 'Creation bypass must authorize only the dedicated release App')
+            protected.add('creation')
+        # Bypass applies to the entire ruleset: never share creation authorization here.
+        if rules & {'update', 'deletion'}:
+            require(not bypass, 'Tag update/deletion rulesets must have no bypass actors')
+            protected |= rules & {'update', 'deletion'}
+    require({'creation', 'update', 'deletion'} <= protected,
+            'Active App-authorized creation and non-bypassable update/deletion tag rules required')
     tags = api(f'repos/{REPO}/git/matching-refs/tags/')
     require(not any(t['ref'] == f'refs/tags/{tag}' for t in tags), 'Tag already exists; never reuse')
     releases = pages(f'repos/{REPO}/releases')
@@ -257,7 +291,7 @@ def verify_registry_image(m):
     require(image['Os'] + '/' + image['Architecture'] == m['image']['platform'], 'Registry platform differs')
 
 
-def publish(m, directory):
+def publication_gates(m):
     # Only the manually dispatched, protected workflow is supported as a writer.
     require(os.environ.get('GITHUB_REPOSITORY') == REPO and
             os.environ.get('GITHUB_REF') == 'refs/heads/master' and
@@ -275,6 +309,21 @@ def publish(m, directory):
         require(promotion_payload(candidate) == promotion_payload(m), 'Promotion changed artifact')
         verify_homolog_record(candidate, m['promotion']['deployment_id'], m['promotion']['manifest_sha256'])
     verify_registry_image(m)
+
+
+def publish(m, directory):
+    # Recheck mutable gates using the read credential; the App needs only Contents write.
+    writer = os.environ.get('GH_TOKEN')
+    reader = os.environ.get('RELEASE_READ_TOKEN')
+    try:
+        if reader:
+            os.environ['GH_TOKEN'] = reader
+        publication_gates(m)
+    finally:
+        if writer is not None:
+            os.environ['GH_TOKEN'] = writer
+        else:
+            os.environ.pop('GH_TOKEN', None)
     manifest = directory / 'release-manifest.json'
     manifest.write_text(canonical(m))
     # Draft first; all assets are verified remotely before reserving the tag.
@@ -344,8 +393,10 @@ def main():
     q = commands.add_parser('next-version'); q.add_argument('messages', type=Path)
     q = commands.add_parser('preflight'); q.add_argument('tag')
     q = commands.add_parser('publish'); q.add_argument('manifest', type=Path)
+    q = commands.add_parser('check-publication'); q.add_argument('manifest', type=Path)
     q = commands.add_parser('promote'); q.add_argument('candidate'); q.add_argument('stable')
     q.add_argument('mode'); q.add_argument('deployment_id', type=int); q.add_argument('directory', type=Path)
+    q.add_argument('--prepare-only', action='store_true')
     q = commands.add_parser('record'); q.add_argument('manifest', type=Path)
     q.add_argument('environment', choices=('homolog', 'production'))
     a = p.parse_args()
@@ -359,6 +410,8 @@ def main():
         print(next_version([r['ref'].removeprefix('refs/tags/') for r in refs], json.loads(a.messages.read_text())))
     elif a.command == 'preflight':
         publication_preflight(a.tag)
+    elif a.command == 'check-publication':
+        publication_gates(json.loads(a.manifest.read_text()))
     elif a.command == 'publish':
         print(canonical(publish(json.loads(a.manifest.read_text()), a.manifest.parent)), end='')
     elif a.command == 'promote':
@@ -370,7 +423,11 @@ def main():
         m['tag'] = a.stable
         # Preserve original candidate manifest; publication gets a separate directory.
         target = a.directory / 'stable'; target.mkdir()
-        print(canonical(publish(m, target)), end='')
+        if a.prepare_only:
+            publication_gates(m)
+            (target / 'release-manifest.json').write_text(canonical(m))
+        else:
+            print(canonical(publish(m, target)), end='')
     elif a.command == 'record':
         original = json.loads(a.manifest.read_text())
         with tempfile.TemporaryDirectory() as temporary:

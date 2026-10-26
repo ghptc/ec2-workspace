@@ -74,15 +74,44 @@ runner, never a runtime/EC2 host. There is no PR, push, or merge publication tri
 
 Before enabling dispatch, an administrator must separately configure:
 
-1. Immutable releases on the workspace repository. It is currently **disabled**.
-2. An active tag ruleset covering `refs/tags/v*`, without exclusions, restricting
-   creation, update and deletion. Currently only a branch ruleset exists. Permit
-   only the designated release writer to bypass creation; do not grant routine
-   users update/deletion bypass. Existing tags/releases are never overwritten.
-3. `release-publication` environment: required owner reviewers, protected-master
-   restriction and prevention of self-approval where supported. Store a narrowly
-   scoped `RELEASE_TOKEN` with contents/package read/write permissions and tag-rule
-   creation authorization. Keep it exclusive to this workflow/environment.
+1. Enable immutable releases on the workspace repository (observed enabled on
+   2026-10-26). Never disable immutability for publication recovery.
+2. Configure two **active tag rulesets**, both matching release tags. `~ALL`,
+   `refs/tags/v*`, and matching pathname glob patterns are supported; exclusions
+   must not exclude the requested release tag. The creation-only ruleset must
+   have exactly one bypass actor: the dedicated App's numeric App ID, actor type
+   `Integration`, mode `always`. A separate ruleset must restrict **update and
+   deletion with no bypass actors**, including the App. GitHub bypass applies to
+   every rule in a ruleset, so adding the App to the existing combined ruleset
+   would authorize mutation and is rejected. Retain non-fast-forward protection
+   where present. Existing tags/drafts block retries; recovery is manual.
+3. Create a dedicated GitHub App owned by `ghptc`, with repository **Contents:
+   read and write**, mandatory Metadata read, no organization permissions and
+   no webhook requirement. Install it using **Only select repositories →
+   ec2-workspace**; never install it on other repositories. App registration,
+   installation and private-key generation require an account administrator.
+   Create the `release-publication` environment with required reviewers,
+   master-only deployment branches and prevention of self-approval where supported.
+   Set environment variable `RELEASE_APP_ID` to the numeric **App ID** (not the
+   installation ID/client ID), and environment secret `RELEASE_APP_PRIVATE_KEY`
+   to the complete PEM private key. No static release PAT is used; remove the old
+   `RELEASE_TOKEN` secret once consumers are migrated. Restrict environment access
+   and runner administration to trusted maintainers.
+
+   The workflow GITHUB_TOKEN has only Contents, Packages and Deployments **read**
+   permissions. Package visibility and homolog evidence are read with this token;
+   configure package access for this repository. Existing protected dependency
+   repositories must also be readable by the runner's separately provisioned
+   read-only credentials where necessary. Builds use the separate private Docker
+   credential helper, not the App token. After input validation, build/promotion
+   gates and read-only publication checks, the pinned `create-github-app-token`
+   action requests Contents write for **ec2-workspace only**. The token goes only
+   into the publication step's environment, never command arguments, evidence or
+   artifacts; the action masks it and revokes it during post-job cleanup. Leave
+   automatic revocation enabled. Publication rechecks mutable gates with the read
+   credential before writing. A token-generation, upload, authorization, digest,
+   tag-creation or immutability failure stops publication without deleting or
+   overwriting existing evidence. Never enable shell tracing or dump environments.
 4. A pre-provisioned **private** `ghcr.io/ghptc/cod4-runtime` package and a private
    Docker credential helper on the runner. Read its visibility before every
    upload. Missing/public package blocks publication. Never upload proprietary
@@ -210,3 +239,7 @@ remain administrator-managed prerequisites and were not changed by this PR.
 References: [GitHub immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases),
 [release integrity verification](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/verify-release-integrity),
 [CLI asset verification](https://cli.github.com/manual/gh_release_verify-asset).
+
+Authentication/rules references: [GitHub App token action](https://github.com/actions/create-github-app-token),
+[tag rules and bypass actors](https://docs.github.com/en/rest/repos/rules),
+[GitHub ruleset pattern syntax](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
