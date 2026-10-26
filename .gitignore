@@ -5,3 +5,5 @@
 *.key
 .aws/
 .ssh/
+__pycache__/
+*.py[cod]

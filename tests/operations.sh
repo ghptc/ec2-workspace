@@ -5,6 +5,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 source scripts/common.sh
+python3 -m unittest discover -s tests -p 'test_*.py'
 mkdir -p -- "$ROOT/.state"
 test_root=$(mktemp -d "$ROOT/.state/test.XXXXXX")
 trap 'rm -rf -- "$test_root"' EXIT
@@ -29,7 +30,7 @@ for script in production homolog deploy-homolog deploy-production game-mode; do
     if "scripts/$script.sh" >/dev/null 2>&1; then exit 1; fi
 done
 for script in deploy-homolog deploy-production; do
-    if "scripts/$script.sh" zombies >/dev/null 2>&1; then exit 1; fi
+    if "scripts/$script.sh" ../invalid >/dev/null 2>&1; then exit 1; fi
 done
 if MOCK_SSH_EXIT=255 scripts/homolog.sh status >/dev/null 2>&1; then exit 1; fi
 if (confirm 'Production test') </dev/null >/dev/null 2>&1; then exit 1; fi
@@ -96,40 +97,18 @@ chmod +x "$test_root/health-bin/"*
 )
 printf 'PASS: actual health payload accepts Promod and rejects wrong UDP game mode\n'
 
+# The mode-switch interface delegates to the exact same approval/deploy path.
 mkdir "$test_root/scripts"
-cp scripts/*.sh "$test_root/scripts/"
+cp scripts/*.sh scripts/*.py "$test_root/scripts/"
 cat >> "$test_root/scripts/common.sh" <<'MOCK'
-snapshot_runtime() {
-    service=$environment
-    config='{"services":{"'"$service"'":{"command":["+set","fs_game","'"${MOCK_MODE:-mods/pml220}"'"]}}}'
-}
-remote() { printf '%s\n' "$*" >> "$MOCK_LOG"; }
-apply_runtime() {
-    cat >> "$MOCK_LOG"
-    if [[ ${MOCK_FAIL_APPLY:-0} == 1 && ! -e "$MOCK_LOG.failed" ]]; then
-        touch "$MOCK_LOG.failed"
-        return 1
-    fi
-}
-check_health() { [[ ${MOCK_FAIL_HEALTH:-0} == 0 ]]; }
+deploy() { printf '%s %s %s\n' "$environment" "$container" "$1" >> "$MOCK_LOG"; }
 MOCK
 : > "$MOCK_LOG"
-"$test_root/scripts/game-mode.sh" homolog promod >/dev/null
-[[ ! -s "$MOCK_LOG" ]]
-MOCK_MODE=mods/other "$test_root/scripts/game-mode.sh" production promod >/dev/null
-grep -q 'cod4-production test -d mods/pml220' "$MOCK_LOG"
-if grep -Eq 'homolog|bard' "$MOCK_LOG"; then exit 1; else [[ $? == 1 ]]; fi
-for args in 'invalid promod' 'homolog zombies'; do
-    read -r -a values <<< "$args"
-    if "$test_root/scripts/game-mode.sh" "${values[@]}" >/dev/null 2>&1; then exit 1; fi
-done
-# A failed mode change must restore the original configuration and still fail.
-: > "$MOCK_LOG"
-if MOCK_MODE=mods/other MOCK_FAIL_APPLY=1 "$test_root/scripts/game-mode.sh" homolog promod > "$test_root/result" 2>&1; then exit 1; fi
-[[ $(grep -c '"services"' "$MOCK_LOG") == 2 ]]
-grep -q 'restoring previous configuration' "$test_root/result"
-if MOCK_MODE=mods/other MOCK_FAIL_HEALTH=1 "$test_root/scripts/game-mode.sh" homolog promod > "$test_root/result" 2>&1; then exit 1; fi
-grep -q 'Mode rollback failed' "$test_root/result"
+"$test_root/scripts/game-mode.sh" homolog fixture
+"$test_root/scripts/game-mode.sh" production fixture
+grep -qx 'homolog cod4-homolog fixture' "$MOCK_LOG"
+grep -qx 'production cod4-production fixture' "$MOCK_LOG"
+if "$test_root/scripts/game-mode.sh" invalid fixture >/dev/null 2>&1; then exit 1; fi
 # Execute the actual remote configuration payload against a local temporary path.
 remote() {
     [[ "$1 $2" == 'bash -c' ]] || return 1
@@ -146,7 +125,7 @@ apply_runtime <<< '{"services":{"homolog":{"environment":{"SECRET":"a$b"}}}}'
 grep -Fq 'a$$b' "$test_root/.operations-homolog.json"
 grep -q -- '--no-deps --pull never --force-recreate homolog' "$MOCK_LOG"
 [[ $(find "$test_root" -maxdepth 1 -name '.operations.*' | wc -l) == 0 ]]
-printf 'PASS: mode idempotency/isolation, private atomic configuration, interpolation escaping and cleanup\n'
+printf 'PASS: mode-switch delegation/isolation, private atomic configuration, interpolation escaping and cleanup\n'
 
 mkdir -p "$test_root/source/bots" "$test_root/source/tools/bots" "$test_root/source/docs" "$test_root/assets" "$test_root/headers"
 git init -q -b master "$test_root/source"
@@ -154,28 +133,31 @@ printf '{"bot_warfare":{"repository":"https://github.com/ineedbots/iw3_bot_warfa
 for file in License.md Copyright.md copying.md docs/third-party-bots.md; do printf notice > "$test_root/source/$file"; done
 # Stand-in for the upstream verified-asset preparation tool, not a deployment implementation.
 cat > "$test_root/source/tools/bots/prepare.py" <<'PY'
-import argparse,pathlib
+import argparse,pathlib,json,hashlib
 p=argparse.ArgumentParser()
 for key in ('promod','bot-warfare','headers','binary','output'): p.add_argument('--'+key,required=True)
-a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture'); (out/'mods/pml220').mkdir(parents=True); (out/'inputs.json').write_text('{}')
+a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture'); (out/'mods/pml220').mkdir(parents=True); (out/'integrity/addiwdheaders').mkdir(parents=True); headers={'jcod4x_00.dat':hashlib.sha256(b'header').hexdigest()} | {f'localized_english_iw{i:02}.dat':hashlib.sha256(b'header').hexdigest() for i in range(7)}
+for name in headers: (out/'integrity/addiwdheaders'/name).write_bytes(b'header')
+(out/'inputs.json').write_text(json.dumps({'maps':['mp_crash','mp_strike'], 'headers':headers}))
 PY
 git -C "$test_root/source" add bots tools docs License.md Copyright.md copying.md
 git -C "$test_root/source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: fixture'
 expected=$(git -C "$test_root/source" rev-parse HEAD)
 printf uncommitted > "$test_root/source/dirty"
-mkdir -p "$test_root/config-source/config"
+mkdir -p "$test_root/config-source"
 command git init -q -b master "$test_root/config-source"
-printf 'set sv_pure "1"\n' > "$test_root/config-source/config/promod.cfg"
-command git -C "$test_root/config-source" add config
+PYTHONPATH=tests python3 -c 'from pathlib import Path; from test_modes import write_catalog; import sys; write_catalog(Path(sys.argv[1]))' "$test_root/config-source"
+command git -C "$test_root/config-source" add modes shared
 command git -C "$test_root/config-source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: config'
-PROMOD_REPOSITORY="$test_root/config-source"
-expected_promod=$(command git -C "$PROMOD_REPOSITORY" rev-parse HEAD)
+CONFIG_REPOSITORY="$test_root/config-source"
+expected_config=$(command git -C "$CONFIG_REPOSITORY" rev-parse HEAD)
 ENGINE_REPOSITORY="$test_root/source"
 stage="$test_root/resolution"
 mkdir "$stage"
+mode_id=promod
 resolve_master
-[[ "$promod_revision" == "$expected_promod" ]]
-[[ -z "$(git -C "$stage/promod" status --porcelain)" ]]
+[[ "$config_revision" == "$expected_config" ]]
+[[ -z "$(git -C "$stage/config" status --porcelain)" ]]
 [[ "$revision" == "$expected" && ! -e "$stage/engine/dirty" ]]
 [[ -z "$(git -C "$stage/engine" status --porcelain)" ]]
 [[ $(cat "$test_root/source/dirty") == uncommitted ]]
@@ -183,6 +165,8 @@ if bash -c 'source scripts/common.sh; ENGINE_REPOSITORY=$1; stage=$2; mkdir "$st
 grep -q 'Cannot fetch origin/master' "$test_root/result"
 printf 'PASS: real local master fetch, exact SHA, isolated clean checkout, developer changes preserved, fetch failure\n'
 
+if (mode_fs_game=mods/unqualified; build_selected_mode) > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'No verified asset preparation recipe' "$test_root/result"
 if (COD4_PROMOD_ASSETS=; build_promod) > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'Explicit authorized' "$test_root/result"
 # Exercise an absent executable using an intentionally empty search path.
@@ -212,6 +196,8 @@ a=p.parse_args(); out=pathlib.Path(a.output); (out/'project/zone_out/fps333').mk
 (out/'manifest.json').write_text(json.dumps({'mod_ff_sha256':hashlib.sha256(b'patched333').hexdigest()}))
 PYTHON
 COD4_INTEGRITY_HEADERS="$test_root/headers"
+if (COD4_PROMOD_ASSETS="$test_root/missing-assets"; build_selected_mode) > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Verified local Promod assets' "$test_root/result"
 artifact_id="sha256:$(printf 'a%.0s' {1..64})"
 old_id="sha256:$(printf 'b%.0s' {1..64})"
 git() {
@@ -226,7 +212,7 @@ docker() {
     case "$1 $2" in
         'image inspect')
             [[ ${missing_image:-0} == 0 ]] || return 1
-            printf '[{"Id":"%s","Os":"linux","Architecture":"amd64","Config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.source":"%s","io.cod4.promod.revision":"%s","io.cod4.assets.lock":"%s","io.cod4.bot-warfare.revision":"%s"}}}]\n' "$artifact_id" "${image_revision_override:-$revision}" "$ENGINE_REPOSITORY" "$promod_revision" "${asset_ref_override:-$asset_ref}" "$bot_revision" ;;
+            printf '[{"Id":"%s","Os":"linux","Architecture":"amd64","Config":{"Labels":{"org.opencontainers.image.revision":"%s","org.opencontainers.image.source":"%s","io.cod4.config.revision":"%s","io.cod4.mode":"promod","io.cod4.config.hash":"%s","io.cod4.fs-game":"mods/pml220","io.cod4.startup-map":"mp_crash","io.cod4.maps":"mp_crash,mp_strike","io.cod4.maxclients":"12","io.cod4.assets.lock":"%s","io.cod4.bot-warfare.revision":"%s"}}}]\n' "$artifact_id" "${image_revision_override:-$revision}" "$ENGINE_REPOSITORY" "$config_revision" "${config_hash_override:-$config_hash}" "${asset_ref_override:-$asset_ref}" "$bot_revision" ;;
         'image save') [[ ${fail_save:-0} == 0 ]] || return 1; printf image ;;
         'image tag') return 0 ;;
         'run --rm') [[ ${fail_build:-0} == 0 ]] || return 1 ;;
@@ -241,7 +227,11 @@ build_promod >/dev/null
 # shellcheck disable=SC2031
 [[ "$artifact" == "$artifact_id" ]]
 [[ $(cat "$stage/runtime/mods/pml220/mod.ff") == patched333 ]]
-cmp "$stage/promod/config/promod.cfg" "$stage/runtime/mods/pml220/canonical-promod.cfg"
+cmp "$stage/config/shared/server.cfg" "$stage/runtime/mods/pml220/canonical-shared.cfg"
+cmp "$stage/config/modes/promod/server.cfg" "$stage/runtime/mods/pml220/canonical-mode.cfg"
+cmp "$stage/config/modes/promod/mode.cfg" "$stage/runtime/configuration/mode.cfg"
+[[ $(find "$stage/runtime/mods" -mindepth 1 -maxdepth 1 -type d | wc -l) == 1 ]]
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["mode_id"]=="promod" and len(d["config_files"])==3 and len(d["headers"])==8' "$stage/runtime/inputs.json"
 grep -q '^COPY runtime/' "$stage/Dockerfile"
 grep -q '^engine$' "$stage/.dockerignore"
 if grep -q 'python3' "$test_root/docker.log"; then exit 1; fi
@@ -251,8 +241,8 @@ if grep -q 'python3' "$test_root/docker.log"; then exit 1; fi
     select_environment homolog
     # Fixture assignments intentionally stay within this preparation subshell.
     # shellcheck disable=SC2030
-    resolve_master() { revision=$expected; promod_revision=$expected_promod; asset_ref=$(printf 'd%.0s' {1..64}); bot_revision=$(printf 'c%.0s' {1..40}); }
-    build_promod() { artifact=$artifact_id; }
+    resolve_master() { revision=$expected; config_revision=$expected_config; asset_ref=$(printf 'd%.0s' {1..64}); bot_revision=$(printf 'c%.0s' {1..40}); }
+    build_selected_mode() { artifact=$artifact_id; }
     # shellcheck disable=SC2329
     remote() { exit 99; }
     deploy_image() { exit 98; }
@@ -272,7 +262,7 @@ remote() {
         'docker inspect')
             if [[ "$*" == *'{{.Image}} {{.State.Running}}'* ]]; then printf '%s true\n' "${homolog_id:-$artifact_id}"
             elif [[ "$*" == 'docker inspect cod4-homolog' ]]; then
-                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s","io.cod4.promod.revision":"%s"},"Cmd":["+exec","canonical-promod.cfg","+set","fs_basepath","/opt/cod4-artifact","+set","fs_game","mods/pml220","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision" "$promod_revision"
+                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s","io.cod4.config.revision":"%s","io.cod4.mode":"promod","io.cod4.config.hash":"%s","io.cod4.fs-game":"mods/pml220","io.cod4.startup-map":"mp_crash","io.cod4.maps":"mp_crash,mp_strike","io.cod4.maxclients":"12"},"Cmd":["+set","fs_game","mods/pml220","+set","fs_basepath","/opt/cod4-artifact","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity","+set","sv_maxclients","12","+exec","canonical-shared.cfg","+exec","canonical-mode.cfg","+map","mp_crash"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision" "$config_revision" "${homolog_hash_override:-$config_hash}"
             elif [[ "$apply_count" -ge 2 ]]; then printf '%s\n' "$old_id"
             else printf '%s\n' "$artifact_id"; fi ;;
         'docker image') cat >/dev/null; [[ ${fail_ssh:-0} == 0 ]] ;;
@@ -288,9 +278,9 @@ apply_runtime() { printf 'apply %s\n' "$container" >> "$test_root/remote.log"; c
 check_health() { [[ ${2:-} != cod4-homolog ]] || return 0; [[ ${fail_rollback:-0} == 0 ]] || return 1; [[ ${fail_health:-0} == 0 || "$apply_count" -ge 2 ]]; }
 confirm() { printf 'confirm\n' >> "$test_root/remote.log"; [[ ${decline:-0} == 0 ]]; }
 deploy_image "$artifact_id" >/dev/null
-read -r approved approved_revision approved_assets approved_bots approved_promod < "$ROOT/.state/approved"
-[[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" && "$approved_promod" == "$expected_promod" ]]
-grep -q 'canonical-promod.cfg' "$test_root/applied"
+read -r approved approved_revision approved_assets approved_bots approved_config approved_mode approved_hash < "$ROOT/.state/approved"
+[[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" && "$approved_config" == "$expected_config" && "$approved_mode" == promod && "$approved_hash" == "$config_hash" ]]
+grep -q 'canonical-shared.cfg' "$test_root/applied"
 grep -q '/opt/cod4-artifact/cod4x18_dedrun' "$test_root/applied"
 grep -q '"source": "/persist"' "$test_root/applied"
 if grep -Eq 'production|bard' "$test_root/remote.log"; then exit 1; else [[ $? == 1 ]]; fi
@@ -324,9 +314,11 @@ if (deploy_image "$old_id") >/dev/null 2>&1; then exit 1; fi
 if (homolog_id=$old_id; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
 if (image_revision_override=invalid; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
 if (asset_ref_override=invalid; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
+if (config_hash_override=invalid; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
+if (homolog_hash_override=invalid; deploy_image "$artifact_id") >/dev/null 2>&1; then exit 1; fi
 printf 'PASS: homolog provenance/approval, promotion confirmation, identities, transfer failures, mount preservation, rollback success/failure\n'
 
-build_promod() { printf forbidden > "$test_root/rebuilt"; return 1; }
+build_selected_mode() { printf forbidden > "$test_root/rebuilt"; return 1; }
 deploy_image() { printf '%s\n' "$1" > "$test_root/promoted"; }
 deploy promod >/dev/null
 [[ $(cat "$test_root/promoted") == "$artifact_id" && ! -e "$test_root/rebuilt" ]]
@@ -334,12 +326,15 @@ printf newer > "$test_root/source/newer"
 command git -C "$test_root/source" add newer
 command git -C "$test_root/source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: newer master'
 resolve_master() { printf forbidden > "$test_root/fetched"; return 1; }
+mv "$test_root/config-source/modes/promod" "$test_root/config-source/removed-mode"
 deploy promod > "$test_root/result" 2>&1
 [[ $(cat "$test_root/promoted") == "$artifact_id" && ! -e "$test_root/fetched" ]]
+if deploy fixture > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Requested mode differs' "$test_root/result"
 printf 'unapproved image\n' > "$ROOT/.state/approved"
 if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'Malformed approval record' "$test_root/result"
 rm "$ROOT/.state/approved"
 if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'No approved homolog artifact' "$test_root/result"
-printf 'PASS: exact production promotion without rebuild, promotion despite newer master and untested-artifact rejection\n'
+printf 'PASS: exact production promotion without rebuild, promotion despite newer master/removed catalog mode and untested-artifact rejection\n'

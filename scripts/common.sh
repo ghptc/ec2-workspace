@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+OPERATIONS_SCRIPTS=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd -- "$OPERATIONS_SCRIPTS/.." && pwd)
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "Required command: $1"; }
 # Quote each argument for the remote login shell; never interpolate untrusted code.
@@ -97,31 +98,13 @@ exit 1
 REMOTE
 }
 image_config() {
-    python3 -c '
-import json,sys
-c=json.load(sys.stdin); s=c["services"][sys.argv[1]]; s["image"]=sys.argv[2]
-if sys.argv[3]=="artifact":
-    targets=[v.get("target", "") for v in s.get("volumes",[]) if isinstance(v,dict)]
-    if not {"/home/user/cod4/main","/home/user/cod4/zone","/home/user/.callofduty4"}.issubset(targets):
-        sys.exit("Expected game-data and persistent home mounts missing")
-    if any(p=="/opt/cod4-artifact" or "/opt/cod4-artifact".startswith(p.rstrip("/")+"/") for p in targets if p):
-        sys.exit("A mount shadows the packaged artifact")
-    if s.get("entrypoint") != ["/home/user/cod4/cod4x18_dedrun"] and s.get("entrypoint") != ["/opt/cod4-artifact/cod4x18_dedrun"]:
-        sys.exit("Unsupported runtime entrypoint")
-    a=s.get("command")
-    if not isinstance(a,list): sys.exit("Expected list-form runtime command")
-    for key,value in [("fs_basepath","/opt/cod4-artifact"),("fs_game","mods/pml220"),("fs_localizedHeadersPath","/opt/cod4-artifact/integrity")]:
-        indices=[i+2 for i in range(len(a)-2) if a[i:i+2]==["+set",key]]
-        if len(indices)>1: sys.exit("Ambiguous runtime argument: "+key)
-        if indices: a[indices[0]]=value
-        else: a.extend(["+set",key,value])
-    # Load defaults first; inherited private execs/settings retain precedence.
-    canonical=["+exec","canonical-promod.cfg"]
-    if a[:2]!=canonical: a[:0]=canonical
-    s["working_dir"]="/opt/cod4-artifact"
-    s["entrypoint"]=["/opt/cod4-artifact/cod4x18_dedrun"]
-print(json.dumps(c))
-' "$service" "$1" "${2:-original}" <<< "$config"
+    if [[ ${2:-original} == artifact ]]; then
+        python3 "$OPERATIONS_SCRIPTS/runtime.py" adapt "$service" "$1" "$mode_id" "$config_hash" \
+            "$mode_fs_game" "$startup_map" "$mode_maps" "$mode_maxclients" <<< "$config"
+    else
+        # Rollback retains the exact original command and private runtime configuration.
+        python3 -c 'import json,sys; c=json.load(sys.stdin); c["services"][sys.argv[1]]["image"]=sys.argv[2]; print(json.dumps(c))' "$service" "$1" <<< "$config"
+    fi
 }
 runtime_mode() {
     python3 -c '
@@ -135,23 +118,11 @@ print(values[0])
 verify_homolog() {
     local evidence
     evidence=$(remote docker inspect cod4-homolog) || return 1
-    python3 -c '
-import json,sys
-c=json.load(sys.stdin)[0]; labels=c["Config"].get("Labels") or {}
-def require(condition, message):
-    if not condition: sys.exit(message)
-require(c["Name"]=="/cod4-homolog" and c["Image"]==sys.argv[1] and c["State"]["Running"], "Approved homolog image is not running")
-require(labels.get("org.opencontainers.image.revision")==sys.argv[2], "Homolog source revision differs")
-require(labels.get("io.cod4.promod.revision")==sys.argv[3], "Homolog Promod revision differs")
-require(c["Path"]=="/opt/cod4-artifact/cod4x18_dedrun", "Homolog must run the packaged artifact")
-require(c["Config"].get("WorkingDir")=="/opt/cod4-artifact", "Unexpected homolog working directory")
-require(not any(m["Destination"]=="/opt" or m["Destination"]=="/" or m["Destination"].startswith("/opt/cod4-artifact") for m in c["Mounts"]), "Homolog mounts shadow the artifact")
-a=c["Config"].get("Cmd") or []
-require(a[:2]==["+exec","canonical-promod.cfg"], "Homolog canonical configuration is not loaded first")
-for key,value in [("fs_basepath","/opt/cod4-artifact"),("fs_game","mods/pml220"),("fs_localizedHeadersPath","/opt/cod4-artifact/integrity")]:
-    require([a[i+2] for i in range(len(a)-2) if a[i:i+2]==["+set",key]]==[value], "Homolog runtime differs: "+key)
-' "$1" "$revision" "$promod_revision" <<< "$evidence" || { printf 'Homolog artifact provenance failed; nothing deployed\n' >&2; return 1; }
-    check_health mods/pml220 cod4-homolog 28962
+    python3 "$OPERATIONS_SCRIPTS/runtime.py" verify "$1" "$revision" "$config_revision" \
+        "$mode_id" "$config_hash" "$mode_fs_game" "$startup_map" "$mode_maps" "$mode_maxclients" <<< "$evidence" || {
+        printf 'Homolog artifact provenance failed; nothing deployed\n' >&2; return 1;
+    }
+    check_health "$mode_fs_game" cod4-homolog 28962
 }
 confirm() {
     [[ -t 0 ]] || fail 'Interactive terminal required'
@@ -162,13 +133,17 @@ confirm() {
 deploy_image() {
     need docker
     need python3
-    local metadata identity image_revision platform host_platform previous candidate previous_mode
+    local metadata identity image_revision platform host_platform previous candidate previous_mode startup_contract
+    local -a startup_values
     metadata=$(docker image inspect "$1") || fail "Local image not found: $1"
     identity=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Id"])' <<< "$metadata")
     [[ "$identity" =~ ^sha256:[a-f0-9]{64}$ && "$identity" == "$1" ]] || fail 'Local image identity differs from the recorded artifact'
     image_revision=$(python3 -c 'import json,sys; print((json.load(sys.stdin)[0]["Config"].get("Labels") or {}).get("org.opencontainers.image.revision", ""))' <<< "$metadata")
     [[ "$image_revision" == "$revision" ]] || fail 'Image revision differs from approved artifact'
-    python3 -c 'import json,sys; l=json.load(sys.stdin)[0]["Config"]["Labels"]; (l.get("io.cod4.promod.revision")==sys.argv[4] and l.get("io.cod4.assets.lock")==sys.argv[1] and l.get("io.cod4.bot-warfare.revision")==sys.argv[2] and l.get("org.opencontainers.image.source")==sys.argv[3]) or sys.exit("Image source/dependency labels differ")' "$asset_ref" "$bot_revision" "$ENGINE_REPOSITORY" "$promod_revision" <<< "$metadata" || fail 'Image dependency identity mismatch'
+    startup_contract=$(python3 "$OPERATIONS_SCRIPTS/runtime.py" identity "$identity" "$revision" "$asset_ref" \
+        "$bot_revision" "$config_revision" "$mode_id" "$config_hash" "$ENGINE_REPOSITORY" <<< "$metadata") || fail 'Image dependency identity mismatch'
+    mapfile -t startup_values <<< "$startup_contract"
+    mode_fs_game=${startup_values[0]}; startup_map=${startup_values[1]}; mode_maps=${startup_values[2]}; mode_maxclients=${startup_values[3]}
     platform=$(python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; print(c["Os"]+"/"+c["Architecture"])' <<< "$metadata")
     host_platform=$(remote docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
     [[ "$platform" == "$host_platform" ]] || fail "Image platform $platform differs from host $host_platform"
@@ -181,7 +156,7 @@ deploy_image() {
     candidate=$(image_config "$identity" artifact) || fail 'Cannot safely adapt this runtime configuration'
     previous_mode=$(runtime_mode) || return 1
     if [[ "$environment" == production ]]; then
-        printf 'Production plan: host=aws-prod container=%s project=%s service=%s UDP=%s mode=promod\nPrevious image: %s\nApproved image: %s\nSource revision: %s\nMounts and other runtime settings retained; packaged binary/mods selected. Failure triggers rollback.\n' "$container" "$project" "$service" "$port" "$previous" "$identity" "$revision"
+        printf 'Production plan: host=aws-prod container=%s project=%s service=%s UDP=%s mode=%s\nPrevious image: %s\nApproved image: %s\nSource revision: %s\nMounts and other runtime settings retained; packaged binary/mods selected. Failure triggers rollback.\n' "$container" "$project" "$service" "$port" "$mode_id" "$previous" "$identity" "$revision"
         confirm 'Recreate cod4-production and disconnect players?' || return 1
         verify_homolog "$identity" || return 1
     fi
@@ -189,7 +164,7 @@ deploy_image() {
     image_config "$previous" > "$ROOT/.state/rollback-$environment.json"
     # pipefail prevents applying an incomplete image transfer.
     docker image save "$identity" | remote docker image load >/dev/null || fail 'Image transfer failed; runtime was not changed'
-    if apply_runtime <<< "$candidate" && check_health mods/pml220 && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
+    if apply_runtime <<< "$candidate" && check_health "$mode_fs_game" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
         printf 'Deployed %s revision %s to %s\n' "$identity" "$revision" "$environment"
     else
         printf 'Deployment failed for %s. Restoring previous image %s.\n' "$environment" "$previous" >&2
@@ -203,12 +178,12 @@ deploy_image() {
     if [[ "$environment" == homolog ]]; then
         confirm 'Health checks passed. Approve this exact artifact for production?' || return 1
         mkdir -p -- "$ROOT/.state"
-        printf '%s %s %s %s %s\n' "$identity" "$revision" "$asset_ref" "$bot_revision" "$promod_revision" > "$ROOT/.state/approved.next"
+        write_artifact_record "$identity" > "$ROOT/.state/approved.next"
         mv -- "$ROOT/.state/approved.next" "$ROOT/.state/approved"
     fi
 }
 
-PROMOD_REPOSITORY=https://github.com/ghptc/cod4-promod-server.git
+CONFIG_REPOSITORY=https://github.com/ghptc/cod4-config-server.git
 ENGINE_REPOSITORY=https://github.com/ghptc/cod4x-server.git
 BUILDER=sha256:92528811226fabd05fee63074e22b7b5afd0fa9d63d5994bd3a8f74c8543cbfe
 RUNTIME_BASE=sha256:7050ddb6927fdf0b6703d605f23ebcf2bfb14553c1db01173ec0035294995770
@@ -226,14 +201,27 @@ resolve_master() {
     need python3
     checkout_master "$ENGINE_REPOSITORY" "$stage/engine"
     revision=$(git -C "$stage/engine" rev-parse HEAD)
-    checkout_master "$PROMOD_REPOSITORY" "$stage/promod"
-    promod_revision=$(git -C "$stage/promod" rev-parse HEAD)
-    [[ -s "$stage/promod/config/promod.cfg" ]] || fail 'Canonical config/promod.cfg missing'
+    checkout_master "$CONFIG_REPOSITORY" "$stage/config"
+    config_revision=$(git -C "$stage/config" rev-parse HEAD)
+    select_mode
     asset_ref=$(sha256sum "$stage/engine/bots/dependencies.json") || fail 'Dependency lock missing'
     asset_ref=${asset_ref%% *}
     bot_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bot_warfare"]["commit"])' "$stage/engine/bots/dependencies.json") || fail 'Cannot read Bot Warfare revision'
     [[ "$bot_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Invalid locked Bot Warfare revision'
-    printf 'Resolved engine=%s promod=%s bot-warfare=%s\n' "$revision" "$promod_revision" "$bot_revision"
+    printf 'Resolved engine=%s config=%s mode=%s bot-warfare=%s\n' "$revision" "$config_revision" "$mode_id" "$bot_revision"
+}
+select_mode() {
+    local contract
+    local -a values
+    contract=$(python3 "$OPERATIONS_SCRIPTS/modes.py" select "$stage/config" "$mode_id") || fail 'Invalid mode catalog'
+    mapfile -t values <<< "$contract"
+    mode_fs_game=${values[0]}; startup_map=${values[1]}; config_hash=${values[2]}; mode_maps=${values[3]}; mode_maxclients=${values[4]}
+}
+build_selected_mode() {
+    # The engine asset tool currently qualifies only this runtime. Discovery is
+    # generic; never apply its Bot Warfare/FPS transformations to another mod.
+    [[ "$mode_fs_game" == mods/pml220 ]] || fail 'No verified asset preparation recipe for selected fs_game'
+    build_promod
 }
 build_promod() {
     need python3
@@ -266,17 +254,8 @@ build_promod() {
     cp -- "$stage/fps333/project/zone_out/fps333/mod.ff" "$stage/runtime/mods/pml220/mod.ff" || fail 'FPS asset missing'
     cp -- "$stage/fps333/manifest.json" "$stage/runtime/fps333.json"
     cp -r -- "$stage/fps333/project/raw" "$stage/runtime/fps333-source"
-    cp -- "$stage/promod/config/promod.cfg" "$stage/runtime/mods/pml220/canonical-promod.cfg"
-    python3 - "$stage/runtime" "$revision" "$promod_revision" "$bot_revision" <<'PYTHON' || fail 'Runtime provenance validation failed'
-import hashlib,json,pathlib,sys
-root=pathlib.Path(sys.argv[1])
-record=json.loads((root/'inputs.json').read_text())
-fps=json.loads((root/'fps333.json').read_text())
-assert hashlib.sha256((root/'mods/pml220/mod.ff').read_bytes()).hexdigest()==fps['mod_ff_sha256']
-record.update(engine_revision=sys.argv[2],promod_revision=sys.argv[3],bot_revision=sys.argv[4],fps333=fps,
-              config_sha256=hashlib.sha256((root/'mods/pml220/canonical-promod.cfg').read_bytes()).hexdigest())
-(root/'inputs.json').write_text(json.dumps(record,indent=2)+'\n')
-PYTHON
+    python3 "$OPERATIONS_SCRIPTS/modes.py" package "$stage/config" "$mode_id" "$stage/runtime" \
+        "$revision" "$config_revision" "$bot_revision" || fail 'Mode configuration packaging failed'
     mkdir "$stage/runtime/licenses" || fail 'Cannot prepare runtime notices'
     cp -- "$stage/engine/License.md" "$stage/engine/Copyright.md" "$stage/engine/copying.md" "$stage/engine/docs/third-party-bots.md" "$stage/runtime/licenses/" || fail 'Cannot retain engine notices'
     cp -- "$stage/bots/README.md" "$stage/runtime/licenses/Bot-Warfare-README.md" || fail 'Cannot retain Bot Warfare notices'
@@ -290,19 +269,31 @@ RUN chmod -R a+rX /opt/cod4-artifact && ln -s /home/user/cod4/main /opt/cod4-art
 USER 1000:1000
 WORKDIR /opt/cod4-artifact
 ENTRYPOINT ["/opt/cod4-artifact/cod4x18_dedrun"]
-LABEL org.opencontainers.image.source="$ENGINE_REPOSITORY" org.opencontainers.image.revision="$revision" io.cod4.assets.lock="$asset_ref" io.cod4.bot-warfare.revision="$bot_revision" io.cod4.promod.revision="$promod_revision"
+LABEL org.opencontainers.image.source="$ENGINE_REPOSITORY" org.opencontainers.image.revision="$revision" io.cod4.assets.lock="$asset_ref" io.cod4.bot-warfare.revision="$bot_revision" io.cod4.config.revision="$config_revision" io.cod4.mode="$mode_id" io.cod4.config.hash="$config_hash" io.cod4.fs-game="$mode_fs_game" io.cod4.startup-map="$startup_map" io.cod4.maps="$mode_maps" io.cod4.maxclients="$mode_maxclients"
 DOCKERFILE
     # Keep source and Git metadata out of the Docker context and runtime image.
-    printf 'engine\npromod\nbots\nfps333\n' > "$stage/.dockerignore"
+    printf 'engine\nconfig\nbots\nfps333\n' > "$stage/.dockerignore"
     docker build --pull=false --network none --iidfile "$stage/image-id" "$stage" || fail 'Local image build failed'
     artifact=$(cat "$stage/image-id") || fail 'Image builder did not record an identity'
     docker run --rm --pull never --network none --read-only --entrypoint /bin/sh "$artifact" \
-        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/mods/pml220/canonical-promod.cfg; test -s /opt/cod4-artifact/fps333.json; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
+        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/mods/pml220/canonical-shared.cfg; test -s /opt/cod4-artifact/mods/pml220/canonical-mode.cfg; test -s /opt/cod4-artifact/configuration/mode.cfg; test -s /opt/cod4-artifact/fps333.json; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
+}
+write_artifact_record() {
+    printf '%s %s %s %s %s %s %s\n' "$1" "$revision" "$asset_ref" "$bot_revision" "$config_revision" "$mode_id" "$config_hash"
+}
+read_approval() {
+    local approved_mode extra
+    [[ -f "$ROOT/.state/approved" ]] || fail 'No approved homolog artifact; deploy homolog first'
+    [[ $(wc -l < "$ROOT/.state/approved") == 1 ]] || fail 'Malformed approval record'
+    read -r artifact revision asset_ref bot_revision config_revision approved_mode config_hash extra < "$ROOT/.state/approved" || fail 'Malformed approval record'
+    [[ "$config_revision" =~ ^[a-f0-9]{40}$ && -z "$extra" && "$revision" =~ ^[a-f0-9]{40}$ && "$asset_ref" =~ ^[a-f0-9]{64}$ && "$bot_revision" =~ ^[a-f0-9]{40}$ && "$config_hash" =~ ^[a-f0-9]{64}$ && "$approved_mode" =~ ^[a-z][a-z0-9-]*$ ]] || fail 'Malformed approval record; legacy artifacts require fresh homolog qualification'
+    [[ "$approved_mode" == "$mode_id" ]] || fail 'Requested mode differs from approved homolog artifact'
 }
 # Deployment resolution intentionally stays inside its operation subshell.
 # shellcheck disable=SC2030
 deploy() (
-    [[ $# == 1 && "$1" == promod ]] || fail "Usage: deploy-$environment.sh promod (only supported mode)"
+    [[ $# == 1 && "$1" =~ ^[a-z][a-z0-9-]*$ ]] || fail "Usage: deploy-$environment.sh mode-id"
+    mode_id=$1
     for dependency in docker python3 flock; do need "$dependency"; done
     umask 077
     mkdir -p -- "$ROOT/.state"
@@ -313,16 +304,13 @@ deploy() (
         stage=$(mktemp -d "$ROOT/.state/build.XXXXXX")
         trap 'rm -rf -- "$stage"' EXIT
         resolve_master
-        build_promod
+        build_selected_mode
     else
-        [[ -f "$ROOT/.state/approved" ]] || fail 'No approved homolog artifact; deploy homolog first'
-        [[ $(wc -l < "$ROOT/.state/approved") == 1 ]] || fail 'Malformed approval record'
-        read -r artifact revision asset_ref bot_revision promod_revision extra < "$ROOT/.state/approved"
-        [[ "$promod_revision" =~ ^[a-f0-9]{40}$ && -z "$extra" && "$revision" =~ ^[a-f0-9]{40}$ && "$asset_ref" =~ ^[a-f0-9]{64}$ && "$bot_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Malformed approval record'
+        read_approval
     fi
     [[ "$artifact" =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'Invalid artifact image ID'
     if [[ ${COD4_PREPARE_ONLY:-0} == 1 ]]; then
-        printf '%s %s %s %s %s\n' "$artifact" "$revision" "$asset_ref" "$bot_revision" "$promod_revision" > "$ROOT/.state/prepared"
+        write_artifact_record "$artifact" > "$ROOT/.state/prepared"
         printf 'Prepared locally: %s\n' "$artifact"
     else
         deploy_image "$artifact"
