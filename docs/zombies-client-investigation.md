@@ -37,6 +37,7 @@ modified, decompiled or published.
 | BTD disposable native process | 53/53 checks passed, including 15 supported maps, restart, canonical precedence, purity and eight headers | Startup and administrative behavior; no zombie combat or graphical connection proof. |
 | Promod disposable native process | 53/53 checks passed, including 21 maps, admission, Ready Up, voting, rotation and restart | Uses test-only plugin/synthetic fixtures; no graphical match proof. |
 | Native `change_mode` preflight harness | One test passed | Mock command context; no authenticated host bridge or live transition. |
+| Native reliable-command/download characterization | Seven scenarios passed independently | Unchanged production functions and real engine types/message writers; transport/FS/gamestate-send are fixtures and ACKs are assigned directly. No ACK-parser, client CGame, throughput or P0 reproduction claim. |
 
 Private native logs/results are under `.state/zombies-mission-qualification/`.
 The executed engine binary SHA-256 is
@@ -47,10 +48,27 @@ The sibling engine checkout is feature revision
 protected-master-derived image. Preparation manifests carry different historical
 binary hashes; the hash above identifies the binary actually executed.
 
+A subsequent isolated fetch resolved configuration master to
+`8fc7c3d16e52e76750e8f3604847b8e01abd18b9`. All five runtime CFGs under `shared/`,
+`modes/promod/` and `modes/zombies/` are byte-identical to the tested catalog.
+Per-file hashes are recorded privately in
+`.state/zombies-mission-qualification/config-master-comparison.json`. This closes
+catalog-byte provenance only; it does not qualify the engine or final image.
+
 No coverage percentage was measured. Critical paths still uncovered include
 clean-client download/reconnect, reliable-command retention through loading,
 real combat/waves/multiplayer/completion, authenticated switching, actual
 cross-mode rollback and crash recovery.
+
+The new native characterization uses fresh engine master
+`cb0f0f489d3323de968ea426ea19ba7862c50db8`. It covers retransmission until ACK,
+preservation of sent commands during compaction, bounded overflow without ACK,
+recovery-message tail preservation, download/command-ring isolation, download
+backpressure/shared budget and post-download gamestate-refresh invocation.
+Independent review found no critical or high findings. No protocol buffer,
+validation rule or runtime behavior was changed. These are characterization tests,
+not a regression test for the reported client failure, whose reproduction remains
+outstanding.
 
 ## Real-client reproduction suspended by operator
 

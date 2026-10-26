@@ -23,7 +23,7 @@ merged on 2026-10-26 at 20:32:56Z, 20:32:23Z and 20:32:33Z respectively. Their
 reported merge commits are `e827fe75a82254fbb11eaa977709df4a4d246705`,
 `cb0f0f489d3323de968ea426ea19ba7862c50db8` and
 `382f7e5b6430fc01483b37dbd25325f8c88faeb3`. These record merge events; fetch
-current masters before implementation/building. The unmerged wording and source
+current masters before implementation/building. The earlier unmerged wording and source
 tips in [zombies-readiness.md](zombies-readiness.md) predate those events.
 Repository issue searches returned no issues; the linked PRs carry the available
 implementation history. Retrieved discussions for workspace #12, engine #16 and
