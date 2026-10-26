@@ -176,14 +176,23 @@ class PolicyTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ, {'RELEASE_APP_ID': '123'})
+        env.start()
+        self.addCleanup(env.stop)
+
     def preflight_api(self, path, *args, **kwargs):
         if path.endswith('immutable-releases'): return {'enabled': True}
         if '/packages/' in path: return {'visibility': 'private'}
         if path.endswith('rulesets/1'): return {'target': 'tag', 'enforcement': 'active',
             'conditions': {'ref_name': {'include': ['refs/tags/v*'], 'exclude': []}},
-            'rules': [{'type': k} for k in ('creation','update','deletion')]}
+            'bypass_actors': [{'actor_id': 123, 'actor_type': 'Integration', 'bypass_mode': 'always'}],
+            'rules': [{'type': 'creation'}]}
+        if path.endswith('rulesets/2'): return {'target': 'tag', 'enforcement': 'active',
+            'conditions': {'ref_name': {'include': ['~ALL'], 'exclude': []}},
+            'bypass_actors': [], 'rules': [{'type': k} for k in ('update','deletion')]}
         if '/matching-refs/' in path: return []
-        if '/rulesets?' in path: return [{'id': 1}]
+        if '/rulesets?' in path: return [{'id': 1}, {'id': 2}]
         if '/releases?' in path: return []
         raise AssertionError(path)
 
@@ -198,6 +207,44 @@ class PublicationTests(unittest.TestCase):
                 return value if path.endswith(suffix) else self.preflight_api(path)
             with patch.object(release, 'api', side_effect=api), self.assertRaises(ValueError):
                 release.publication_preflight('v0.1.0-rc.1')
+
+    def test_patterns_and_exclusions(self):
+        for pattern, matches in [('~ALL', True), ('refs/tags/v*', True),
+                                 ('refs/tags/**', True), ('refs/tags/v[0-9].*', True),
+                                 ('refs/tags/v[^9]*', True), ('refs/tags/v[^0]*', False),
+                                 ('refs/tags/other*', False), ('~DEFAULT_BRANCH', False),
+                                 ('refs/*', False)]:
+            self.assertEqual(release.tag_pattern_matches(pattern, 'v0.1.0-rc.1'), matches)
+        for includes, excludes, succeeds in [(['~ALL'], [], True),
+                (['refs/tags/v?.*'], ['refs/tags/v9*'], True),
+                (['~ALL'], ['refs/tags/v*'], False), (['refs/tags/other*'], [], False)]:
+            def api(path, *args, **kwargs):
+                result = self.preflight_api(path)
+                if path.endswith('rulesets/1'):
+                    result['conditions']['ref_name'] = {'include': includes, 'exclude': excludes}
+                return result
+            with patch.object(release, 'api', side_effect=api):
+                if succeeds: release.publication_preflight('v0.1.0-rc.1')
+                else:
+                    with self.assertRaises(ValueError): release.publication_preflight('v0.1.0-rc.1')
+
+    def test_unauthorized_or_mutable_rules_fail_closed(self):
+        for rule_id, change in [(1, {'bypass_actors': []}),
+                (1, {'bypass_actors': [{'actor_id': 999, 'actor_type': 'Integration', 'bypass_mode': 'always'}]}),
+                (1, {'rules': [{'type': 'creation'}, {'type': 'update'}]}),
+                (2, {'bypass_actors': [{'actor_id': 123, 'actor_type': 'Integration', 'bypass_mode': 'always'}]}),
+                (2, {'rules': [{'type': 'update'}]})]:
+            def api(path, *args, **kwargs):
+                result = self.preflight_api(path)
+                if path.endswith(f'rulesets/{rule_id}'): result.update(change)
+                return result
+            with patch.object(release, 'api', side_effect=api), self.assertRaises(ValueError):
+                release.publication_preflight('v0.1.0-rc.1')
+
+    def test_failed_gates_never_write(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(release, 'publication_gates', side_effect=ValueError('gate')), patch.object(release, 'api') as api:
+            with self.assertRaises(ValueError): release.publish(manifest(), Path(directory))
+            api.assert_not_called()
 
     def test_duplicate_tag_and_interrupted_draft_block_without_writes(self):
         for existing in ('tag', 'draft'):
@@ -218,6 +265,36 @@ class PublicationTests(unittest.TestCase):
     def test_concurrent_atomic_tag_creation_failure_keeps_draft_unpublished(self):
         with tempfile.TemporaryDirectory() as directory:
             self.exercise_publication(Path(directory), True)
+
+    def test_publication_failures_stop_without_cleanup_or_overwrite(self):
+        for failure in ('draft', 'upload', 'digest', 'publish', 'immutable'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); m = manifest(); writes = []
+                def api(path, method='GET', data=None):
+                    writes.append(method)
+                    if method == 'POST' and path.endswith('/releases'):
+                        if failure == 'draft': raise ValueError('403')
+                        return {'id': 1}
+                    if method == 'POST': return {}
+                    if method == 'PATCH':
+                        if failure == 'publish': raise ValueError('403')
+                        return {'draft': False, 'immutable': failure != 'immutable'}
+                    raise AssertionError(path)
+                def run(*args, **kwargs):
+                    if failure == 'upload': raise ValueError('upload failed')
+                with patch.object(release, 'publication_gates'), patch.object(release, 'api', side_effect=api), patch.object(release, 'run', side_effect=run), patch.object(release, 'pages', side_effect=lambda _: [{'name': 'release-manifest.json', 'digest': 'sha256:' + ('0'*64 if failure == 'digest' else release.sha256(root/'release-manifest.json'))}]):
+                    with self.assertRaises(ValueError): release.publish(m, root)
+                self.assertNotIn('DELETE', writes)
+                if failure in ('draft', 'upload', 'digest'): self.assertNotIn('PATCH', writes)
+
+    def test_workflow_writer_is_scoped_and_after_gates(self):
+        workflow = (release.ROOT/'.github/workflows/release.yml').read_text()
+        self.assertNotIn('secrets.RELEASE_TOKEN', workflow)
+        self.assertIn('permission-contents: write', workflow)
+        self.assertIn('repositories: ec2-workspace', workflow)
+        self.assertLess(workflow.index('check-publication "$MANIFEST"'), workflow.index('id: writer'))
+        self.assertLess(workflow.index('id: writer'), workflow.index('name: Publish verified'))
+        self.assertIn('permissions:\n  contents: read\n  packages: read\n  deployments: read', workflow)
 
     def exercise_publication(self, root, concurrent):
         m = manifest(); writes = []

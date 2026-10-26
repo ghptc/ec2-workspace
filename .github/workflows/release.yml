@@ -22,6 +22,8 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+  packages: read
+  deployments: read
 jobs:
   release:
     if: github.ref == 'refs/heads/master'
@@ -29,6 +31,8 @@ jobs:
     runs-on: [self-hosted, cod4-release-isolated]
     environment: release-publication
     timeout-minutes: 90
+    env:
+      RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -46,6 +50,8 @@ jobs:
           sys.path.insert(0,'scripts')
           import release
           v=release.version(os.environ['VERSION'])
+          release.require(os.environ['OPERATION'] in ('candidate','promote'),'Unknown operation')
+          release.require(os.environ.get('RELEASE_APP_ID','').isdigit(),'RELEASE_APP_ID required')
           if os.environ['OPERATION']=='candidate':
               release.require(v[3] is not None,'Candidate must be an rc')
           else:
@@ -53,10 +59,11 @@ jobs:
               release.version(os.environ['CANDIDATE'])
               release.require(os.environ['DEPLOYMENT_ID'].isdigit(),'Deployment ID required')
           PY
-      - name: Build, gate and publish candidate
+      - name: Build and gate candidate
+        id: candidate
         if: inputs.operation == 'candidate'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           COD4_GAME_DATA: ${{ vars.COD4_GAME_DATA }}
           COD4_PROMOD_ASSETS: ${{ vars.COD4_PROMOD_ASSETS }}
@@ -65,16 +72,13 @@ jobs:
         run: |
           set -euo pipefail
           # Runner uses a private Docker credential helper for the pre-provisioned package.
-          output=$(mktemp)
-          export GITHUB_OUTPUT="$output"
           ./scripts/release-build.sh promod "$RELEASE_VERSION"
-          manifest=$(sed -n 's/^manifest=//p' "$output")
-          test -n "$manifest"
-          python3 scripts/release.py publish "$manifest"
-      - name: Promote without rebuilding
+
+      - name: Prepare and gate promotion without rebuilding
+        id: promotion
         if: inputs.operation == 'promote'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           CANDIDATE: ${{ inputs.candidate }}
           DEPLOYMENT_ID: ${{ inputs.homolog_deployment_id }}
@@ -82,4 +86,25 @@ jobs:
           set -euo pipefail
           mkdir -p .state/promotions
           evidence=$(mktemp -d .state/promotions/promotion.XXXXXX)
-          python3 scripts/release.py promote "$CANDIDATE" "$RELEASE_VERSION" promod "$DEPLOYMENT_ID" "$evidence"
+          python3 scripts/release.py promote "$CANDIDATE" "$RELEASE_VERSION" promod "$DEPLOYMENT_ID" "$evidence" --prepare-only
+          echo "manifest=$evidence/stable/release-manifest.json" >> "$GITHUB_OUTPUT"
+      - name: Verify all publication gates with read-only credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST: ${{ steps.candidate.outputs.manifest || steps.promotion.outputs.manifest }}
+        run: python3 scripts/release.py check-publication "$MANIFEST"
+      - name: Create short-lived repository-scoped publication token
+        id: writer
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ghptc
+          repositories: ec2-workspace
+          permission-contents: write
+      - name: Publish verified immutable release
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          RELEASE_READ_TOKEN: ${{ github.token }}
+          MANIFEST: ${{ steps.candidate.outputs.manifest || steps.promotion.outputs.manifest }}
+        run: python3 scripts/release.py publish "$MANIFEST"
