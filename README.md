@@ -1,23 +1,3 @@
-# Immutable GitHub Releases (proposed migration)
-
-Explicit-version deployments are implemented on this branch:
-
-```bash
-./scripts/deploy-homolog.sh promod v0.1.0-rc.1
-./scripts/deploy-production.sh promod v0.1.0
-```
-
-These commands verify attested immutable GitHub Releases and reuse the exact
-published image. Production requires stable promotion evidence. They do not use
-mutable master or local approvals. Publication and rollout are not yet qualified;
-repository protection/private-package/runner prerequisites remain unconfigured.
-See [architecture and release gates](docs/releases/architecture.md) and
-[migration inventory and recovery](docs/releases/migration.md) before adoption.
-
-The one-argument commands and historical qualification notes below describe the
-preserved legacy compatibility path. They remain available until the release
-workflow is qualified. No EC2/service changes or real releases accompany this PR.
-
 # CoD4 remote operations
 
 ```bash
@@ -33,7 +13,7 @@ workflow is qualified. No EC2/service changes or real releases accompany this PR
 ./scripts/game-mode.sh production promod
 ```
 
-Only Promod is supported. Local prerequisites: Bash, Git, Docker, Python 3.11+
+Promod and the private Before the Dawn Zombies candidate use the same deployment path. Zombies gameplay still requires a real client qualification. Local prerequisites: Bash, Git, Docker, Python 3.11+
 and GNU coreutils/flock. SSH uses `~/.ssh/config`, alias `aws-prod`, batch mode
 and strict host-key verification. Trust the host key before running commands.
 System SSH includes are bypassed without changing them.
@@ -331,8 +311,7 @@ authorize deployment or any production/homolog/Bard service action.
 
 ## Before the Dawn packaging and RCON switching design
 
-Status: private original-file packaging is supported; RCON activation and BTD
-image build/promotion are disabled. A catalog entry is not an approved artifact.
+Status: private original-file packaging and master-based image preparation are supported; RCON activation remains disabled. A catalog entry is not an approved artifact.
 The companion engine command is an administrative **preflight only** and reports
 unavailable without submitting or executing a deployment request.
 
@@ -343,11 +322,23 @@ preserves `mod.ff`/three IWDs and notices without decompiling, and records hashe
 binary, and does not run Promod FPS or Bot Warfare transformations. No third-party
 asset is added to a public repository or published image by this change.
 
-For a newly prepared private BTD runtime, the existing package CLI can be used
-locally with reviewed engine/config identities and `none` for the inapplicable Bot
-Warfare revision. This is a preparation record, **not** a promotable image under
-the existing mandatory Bot Warfare/FPS image contract. Image building still fails
-closed for non-Promod modes; do not invent a dependency revision to bypass it.
+Zombies uses `COD4_BTD_ASSETS` (the directory containing `btd_alpha_001/`
+and `readme.txt`) and `COD4_INTEGRITY_HEADERS`. It never applies Promod FPS or
+Bot Warfare transformations. Its provenance records the original BTD lock hash
+and `none` for the inapplicable Bot Warfare revision. Production still promotes
+only the exact image approved and currently healthy in homolog, without fetching
+or rebuilding. A selectable mode is not gameplay certification.
+
+```bash
+COD4_PREPARE_ONLY=1 ./scripts/deploy-homolog.sh zombies  # local build only
+# After real-client qualification, under supervision:
+./scripts/deploy-homolog.sh zombies
+```
+
+The unused GitHub Release path is retired in `docs/releases/retired/`; its source,
+workflow and tests remain historical evidence. Version arguments are rejected.
+No GitHub App, release, runner, registry or additional deployment framework is used.
+Existing `.state` approvals, rollback records and deployed services are untouched.
 
 The original vendor defaults are hash checked and appended as fixed execs to the
 shared phase. Their names must be simple BTD CFG basenames present in the asset

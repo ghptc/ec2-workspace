@@ -1,3 +1,5 @@
+> Historical, retired proposal. Use the master-based commands in the root README.
+
 # Migration and recovery
 
 ## Preserved inventory (2026-10-26)

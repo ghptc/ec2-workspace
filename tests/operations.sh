@@ -79,7 +79,7 @@ printf 'true none\n'
 MOCK
 cat > "$test_root/health-bin/timeout" <<'MOCK'
 #!/usr/bin/env bash
-printf 'statusResponse\n\\fs_game\\%s\\mapname\\mp_crash\n' "$MOCK_HEALTH_MODE"
+printf 'statusResponse\n\\fs_game\\%s\\g_gametype\\%s\\sv_pure\\1\\mapname\\mp_crash\n' "$MOCK_HEALTH_MODE" "${MOCK_HEALTH_GAMETYPE:-sd}"
 MOCK
 cat > "$test_root/health-bin/sleep" <<'MOCK'
 #!/usr/bin/env bash
@@ -92,6 +92,10 @@ chmod +x "$test_root/health-bin/"*
     select_environment production
     export MOCK_HEALTH_MODE=mods/pml220
     check_health mods/pml220
+    export MOCK_HEALTH_MODE=mods/btd_alpha_001 MOCK_HEALTH_GAMETYPE=war
+    check_health mods/btd_alpha_001
+    export MOCK_HEALTH_GAMETYPE=sd
+    if check_health mods/btd_alpha_001 >/dev/null 2>&1; then exit 1; fi
     export MOCK_HEALTH_MODE=mods/other
     if check_health mods/pml220 >/dev/null 2>&1; then exit 1; fi
 )
@@ -356,3 +360,12 @@ rm "$ROOT/.state/approved"
 if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
 grep -q 'No approved homolog artifact' "$test_root/result"
 printf 'PASS: exact production promotion without rebuild, promotion despite newer master/removed catalog mode and untested-artifact rejection\n'
+
+# The same production path accepts the explicit absence of Bot Warfare for BTD.
+mode_id=zombies; bot_revision=none
+write_artifact_record "$artifact_id" > "$ROOT/.state/approved"
+deploy zombies > "$test_root/result" 2>&1
+[[ $(cat "$test_root/promoted") == "$artifact_id" && ! -e "$test_root/fetched" && ! -e "$test_root/rebuilt" ]]
+if deploy promod > "$test_root/result" 2>&1; then exit 1; fi
+grep -q 'Requested mode differs' "$test_root/result"
+printf 'PASS: exact Zombies promotion, explicit no-Bot-Warfare provenance and cross-mode approval rejection\n'

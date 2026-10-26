@@ -1,0 +1,16 @@
+name: Operations
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  operations:
+    name: Operations tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate deployment and packaging with local mocks
+        run: bash tests/operations.sh
