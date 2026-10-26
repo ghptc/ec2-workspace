@@ -249,7 +249,8 @@ build_promod() {
     python3 -m unittest discover -s "$stage/engine/tests" -p 'test_punkbuster_policy.py' || fail 'PB policy validation failed'
     python3 "$stage/engine/tools/bots/prepare.py" --promod "$promod" --bot-warfare "$stage/bots" \
         --headers "$headers" --binary "$stage/engine/bin/cod4x18_dedrun" --output "$stage/runtime" \
-        --allow-no-punkbuster || fail 'Runtime assets failed verification'
+        --allow-no-punkbuster --allow-map-voting || fail 'Runtime assets failed verification'
+    [[ -s "$stage/runtime/mods/pml220/promod/comp.gsx" && -s "$stage/runtime/mods/pml220/promod/readyup.gsx" ]] || fail 'Promod voting/Ready Up overlays missing'
     [[ -s "$stage/runtime/mods/pml220/promod/servercheck.gsx" ]] || fail 'Promod PB warning overlay missing'
     python3 "$stage/engine/tools/promod/fps333.py" --promod "$promod/mod.ff" \
         --oat "$COD4_OAT" --output "$stage/fps333" || fail 'FPS menu rebuild failed'

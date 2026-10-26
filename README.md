@@ -55,18 +55,26 @@ credentials, duplicate keys, undocumented shared overrides, invalid rotations,
 and purity other than `1` fail before runtime mutation. Only the selected mode
 is packaged; discovery does not require other modes' assets.
 
-`mode.cfg` supplies startup-only `fs_game`; it is parsed as data, never executed
-after filesystem initialization. Runtime argv selects filesystem paths first,
-then executes `canonical-shared.cfg`, then `canonical-mode.cfg`, then inherited
-private CFG execs in their existing order, and finally starts a qualified map.
-The first rotation map is the default; a compatible explicit private initial map
-is retained. Duplicate filesystem arguments, unsupported startup commands,
-mounts shadowing any artifact path and unqualified initial maps are rejected.
-Private files are not rewritten. Native `+set` arguments are retained; the engine
-processes them early, so use the existing private CFG execs for late overrides.
-`+set sv_pure 0` is rejected. Capacity is also passed at startup because
-`sv_maxclients` is initialization-only; a valid explicit private capacity retains
-precedence. Slot limits outside the engine range (1–64) are rejected.
+`mode.cfg` supplies startup-only `fs_game`, parsed as data. Runtime argv selects
+filesystem paths and mode-owned capacity first, executes `canonical-shared.cfg`,
+then inherited private CFGs in their existing relative order, and finally
+`canonical-mode.cfg` followed by native `+map_rotate`. Native exec completes
+nested private CFGs before returning to the final canonical mode CFG. Thus
+obsolete private rotation/voting/gameplay values cannot replace mode rules;
+private credentials and environment settings remain available. Early `+set`
+arguments do not override the final mode CFG. A conflicting private capacity is
+rejected rather than silently overriding initialization-only slot allocation.
+Legacy explicit startup maps are checked against qualified assets, then replaced
+by native rotation; the engine owns randomized selection and no-repeat behavior.
+Unsupported startup commands, duplicate filesystem arguments, purity other than
+1 and artifact-shadowing mounts remain rejected. Private files are not rewritten.
+
+Promod preparation now requires the existing `--allow-map-voting` overlay and
+bot Ready Up correction. The canonical mode owns native vote settings; no
+workspace map list or duplicate voting logic is maintained. All selected rotation
+maps must be qualified by the prepared asset manifest. The original human Ready
+Up and recording controls remain enabled. See the companion engine validation
+record for real local runtime evidence and graphical-client limits.
 
 Mode switching uses the same locked deployment path as deploy-homolog/production,
 including container recreation, homolog approval and rollback. It never decides
@@ -109,7 +117,7 @@ git diff --check
 Promod preparation enables the existing `--allow-no-punkbuster` option. The
 private runtime contains `mods/pml220/promod/servercheck.gsx`, and its manifest
 records `punkbuster_warning_policy_overlay: true`. Packaging appends
-`set promod_allow_no_punkbuster "1"` to `canonical-mode.cfg` only for an enabled
+`set promod_allow_no_punkbuster "1"` to `canonical-shared.cfg` only for an enabled
 Promod overlay. The source catalog CFGs and their provenance hashes remain
 unchanged; this generated runtime setting executes before map initialization.
 Private startup CFGs retain precedence and may set the policy to `0`.
