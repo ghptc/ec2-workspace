@@ -271,12 +271,20 @@ remote() {
 }
 snapshot_runtime() {
     service=$environment; project="cod4-$environment"; work=/opt/services/cod4
-    config='{"services":{"'"$service"'":{"entrypoint":["/home/user/cod4/cod4x18_dedrun"],"command":["+set","fs_game","mods/pml220"],"volumes":[{"source":"/persist","target":"/home/user/.callofduty4"},{"source":"/main","target":"/home/user/cod4/main"},{"source":"/zone","target":"/home/user/cod4/zone"}]}}}'
+    config='{"services":{"'"$service"'":{"entrypoint":["/home/user/cod4/cod4x18_dedrun"],"command":["+set","fs_game","mods/pml220","+set","fs_homepath","'"${fixture_homepath:-/home/user/.callofduty4}"'"],"volumes":[{"source":"/persist","target":"/home/user/.callofduty4"},{"source":"/main","target":"/home/user/cod4/main"},{"source":"/zone","target":"/home/user/cod4/zone"}]}}}'
     inspection='[{"Image":"'"$old_id"'"}]'
 }
-apply_runtime() { printf 'apply %s\n' "$container" >> "$test_root/remote.log"; cat >> "$test_root/applied"; apply_count=$((apply_count+1)); [[ ${fail_apply:-0} == 0 || "$apply_count" -gt 1 ]]; }
+apply_runtime() { printf 'apply %s\n' "$container" >> "$test_root/remote.log"; tee "$test_root/last-applied" >> "$test_root/applied"; apply_count=$((apply_count+1)); [[ ${fail_apply:-0} == 0 || "$apply_count" -gt 1 ]]; }
 check_health() { [[ ${2:-} != cod4-homolog ]] || return 0; [[ ${fail_rollback:-0} == 0 ]] || return 1; [[ ${fail_health:-0} == 0 || "$apply_count" -ge 2 ]]; }
 confirm() { printf 'confirm\n' >> "$test_root/remote.log"; [[ ${decline:-0} == 0 ]]; }
+# Unsafe adaptation must fail before image transfer, runtime writes or rollback changes.
+printf 'preserved rollback evidence\n' > "$ROOT/.state/rollback-homolog.json"
+if (fixture_homepath=/tmp; deploy_image "$artifact_id") > "$test_root/result" 2>&1; then exit 1; fi
+grep -q "Unsafe fs_homepath: '/tmp'" "$test_root/result"
+[[ $(cat "$ROOT/.state/rollback-homolog.json") == 'preserved rollback evidence' ]]
+[[ "$apply_count" == 0 && ! -e "$ROOT/.state/approved" ]]
+if grep -Eq 'docker image load|^apply |^confirm$' "$test_root/remote.log"; then exit 1; fi
+: > "$test_root/remote.log"
 deploy_image "$artifact_id" >/dev/null
 read -r approved approved_revision approved_assets approved_bots approved_config approved_mode approved_hash < "$ROOT/.state/approved"
 [[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" && "$approved_config" == "$expected_config" && "$approved_mode" == promod && "$approved_hash" == "$config_hash" ]]
@@ -300,6 +308,9 @@ if grep -Eq '(start|stop|up).*cod4-homolog|bard' "$test_root/remote.log"; then e
 apply_count=0; fail_health=1
 if deploy_image "$artifact_id" > "$test_root/result" 2>&1; then exit 1; fi
 [[ "$apply_count" == 2 ]]; grep -q 'Rollback healthy' "$test_root/result"
+# Rollback records and reapplied commands retain the explicit persistent home.
+cmp "$ROOT/.state/rollback-production.json" "$test_root/last-applied"
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); expected=json.load(sys.stdin); expected["services"]["production"]["image"]=sys.argv[2]; assert c==expected; a=c["services"]["production"]["command"]; assert a[a.index("fs_homepath")+1]=="/home/user/.callofduty4"' "$ROOT/.state/rollback-production.json" "$old_id" <<< "$config"
 fail_health=0; fail_apply=1; apply_count=0
 if deploy_image "$artifact_id" > "$test_root/result" 2>&1; then exit 1; fi
 [[ "$apply_count" == 2 ]]; grep -q 'Rollback healthy' "$test_root/result"

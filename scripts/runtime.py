@@ -7,6 +7,7 @@ import sys
 ARTIFACT_ROOT = '/opt/cod4-artifact'
 EXECUTABLE = ARTIFACT_ROOT + '/cod4x18_dedrun'
 CANONICAL = ('canonical-shared.cfg', 'canonical-mode.cfg')
+PERSISTENT_HOME = '/home/user/.callofduty4'
 # Remove the previous managed exec during migration; private execs stay ordered.
 MANAGED_EXECS = set(CANONICAL) | {'canonical-promod.cfg'}
 
@@ -61,10 +62,18 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
                         'Invalid or ambiguous private capacity')
                 slots.append(value)
             elif key.lower() in {k.lower() for k in managed}:
-                require(key in managed and key not in seen, 'Ambiguous filesystem selection')
+                require(key in managed and key not in seen, f'Ambiguous filesystem selection: {key}')
                 seen.add(key)
+            elif key.lower() == 'fs_homepath':
+                # The existing persistent home remains separate from the packaged artifact.
+                require(key == 'fs_homepath' and key not in seen,
+                        f'Ambiguous filesystem selection: {key}')
+                require(value == PERSISTENT_HOME,
+                        f'Unsafe fs_homepath: {value!r}; expected {PERSISTENT_HOME}')
+                seen.add(key)
+                private.extend(group)
             else:
-                require(not key.lower().startswith('fs_'), 'Unsupported filesystem override')
+                require(not key.lower().startswith('fs_'), f'Unsupported filesystem override: {key}={value!r}')
                 require(key.lower() != 'sv_pure' or value == '1', 'Private argv disables purity')
                 private.extend(group)
         elif command == '+exec':

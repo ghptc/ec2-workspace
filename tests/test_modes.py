@@ -218,6 +218,60 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(args[-2:], ['+map','mp_crash'])
         self.assertEqual(args.count('server.cfg'), 1)
 
+    def test_existing_homolog_filesystem_command_and_runtime_preserved(self):
+        # Exact argv from the locally saved homolog Compose snapshot; no EC2 access.
+        self.service['command'] = [
+            '+set', 'dedicated', '2', '+set', 'net_ip', '0.0.0.0',
+            '+set', 'net_port', '28960', '+set', 'fs_basepath', '/home/user/cod4',
+            '+set', 'fs_homepath', '/home/user/.callofduty4',
+            '+set', 'fs_game', 'mods/pml220', '+set', 'fs_localizedHeadersPath', '/opt/integrity',
+            '+set', 'com_zoneMegs', '64', '+set', 'sv_maxclients', '12',
+            '+set', 'sv_pure', '1', '+set', 'bot_enable', '1',
+            '+exec', 'server.cfg', '+map', 'mp_crash',
+        ]
+        self.service.update(user='1000:1000', read_only=True, pids_limit=128,
+                            tmpfs=['/tmp:rw,nosuid,size=64m'], restart='no',
+                            ports=[{'target': 28960, 'published': '28962', 'protocol': 'udp'}],
+                            environment={'PRIVATE_FIXTURE': 'retained'})
+        for mount in self.service['volumes']:
+            mount.update(type='bind', source='/fixture'+mount['target'],
+                         read_only=mount['target'] != runtime.PERSISTENT_HOME,
+                         bind={'create_host_path': True})
+        self.service['volumes'].extend([
+            {'type': 'bind', 'source': '/fixture/private.cfg',
+             'target': runtime.PERSISTENT_HOME+'/main/server.cfg', 'read_only': True},
+            {'type': 'volume', 'source': 'fixture-usermaps', 'target': '/home/user/cod4/usermaps'},
+        ])
+        result = self.adapt()
+        for key in self.service.keys() - {'entrypoint', 'command'}:
+            self.assertEqual(result[key], self.service[key], key)
+        args = result['command']
+        self.assertEqual(args.count('fs_homepath'), 1)
+        self.assertEqual(args[args.index('fs_homepath')+1], runtime.PERSISTENT_HOME)
+        self.assertEqual(args[:3], ['+set', 'fs_game', 'mods/pml220'])
+        self.assertEqual(args[-2:], ['+map', 'mp_crash'])
+        self.assertEqual(self.adapt(result), result)
+
+    def test_homepath_optional_and_strictly_validated(self):
+        self.assertNotIn('fs_homepath', self.adapt()['command'])
+        for value in ('/tmp', '/opt/cod4-artifact', '/', '../home', '',
+                      '/home/user/.callofduty4/../other', '/home/user/.callofduty4/child'):
+            self.service['command'] = ['+set', 'fs_homepath', value]
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'Unsafe fs_homepath'):
+                self.adapt()
+        for args in (
+            ['+set', 'FS_HOMEPATH', runtime.PERSISTENT_HOME],
+            ['+set', 'fs_homepath', runtime.PERSISTENT_HOME]*2,
+            ['+set', 'fs_homepath', runtime.PERSISTENT_HOME,
+             '+set', 'FS_HOMEPATH', runtime.PERSISTENT_HOME],
+        ):
+            self.service['command'] = args
+            with self.subTest(args=args), self.assertRaisesRegex(ValueError, 'Ambiguous filesystem'):
+                self.adapt()
+        self.service['command'] = ['+set', 'fs_cdpath', '/tmp']
+        with self.assertRaisesRegex(ValueError, "Unsupported filesystem override: fs_cdpath='/tmp'"):
+            self.adapt()
+
     def test_reject_conflicts(self):
         for command in (
             ['+set','fs_game','mods/a','+set','fs_game','mods/b'],
