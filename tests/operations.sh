@@ -137,10 +137,12 @@ import argparse,pathlib,json,hashlib
 p=argparse.ArgumentParser()
 for key in ('promod','bot-warfare','headers','binary','output'): p.add_argument('--'+key,required=True)
 p.add_argument('--allow-no-punkbuster', action='store_true', required=True)
+p.add_argument('--allow-map-voting', action='store_true', required=True)
 a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture'); (out/'mods/pml220').mkdir(parents=True); (out/'integrity/addiwdheaders').mkdir(parents=True); headers={'jcod4x_00.dat':hashlib.sha256(b'header').hexdigest()} | {f'localized_english_iw{i:02}.dat':hashlib.sha256(b'header').hexdigest() for i in range(7)}
 for name in headers: (out/'integrity/addiwdheaders'/name).write_bytes(b'header')
 (out/'mods/pml220/promod').mkdir()
 (out/'mods/pml220/promod/servercheck.gsx').write_text('verified upstream overlay fixture')
+for name in ('comp', 'readyup'): (out/f'mods/pml220/promod/{name}.gsx').write_text('verified upstream overlay fixture')
 (out/'inputs.json').write_text(json.dumps({'maps':['mp_crash','mp_strike'], 'headers':headers, 'punkbuster_warning_policy_overlay':a.allow_no_punkbuster}))
 PY
 git -C "$test_root/source" add bots tools docs License.md Copyright.md copying.md
@@ -230,8 +232,8 @@ build_promod >/dev/null
 # shellcheck disable=SC2031
 [[ "$artifact" == "$artifact_id" ]]
 [[ $(cat "$stage/runtime/mods/pml220/mod.ff") == patched333 ]]
-cmp "$stage/config/shared/server.cfg" "$stage/runtime/mods/pml220/canonical-shared.cfg"
-grep -qx 'set promod_allow_no_punkbuster "1"' "$stage/runtime/mods/pml220/canonical-mode.cfg"
+cmp "$stage/config/modes/promod/server.cfg" "$stage/runtime/mods/pml220/canonical-mode.cfg"
+grep -qx 'set promod_allow_no_punkbuster "1"' "$stage/runtime/mods/pml220/canonical-shared.cfg"
 [[ -s "$stage/runtime/mods/pml220/promod/servercheck.gsx" ]]
 grep -q 'test -s /opt/cod4-artifact/mods/pml220/promod/servercheck.gsx' "$test_root/docker.log"
 cmp "$stage/config/modes/promod/mode.cfg" "$stage/runtime/configuration/mode.cfg"
@@ -267,7 +269,7 @@ remote() {
         'docker inspect')
             if [[ "$*" == *'{{.Image}} {{.State.Running}}'* ]]; then printf '%s true\n' "${homolog_id:-$artifact_id}"
             elif [[ "$*" == 'docker inspect cod4-homolog' ]]; then
-                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s","io.cod4.config.revision":"%s","io.cod4.mode":"promod","io.cod4.config.hash":"%s","io.cod4.fs-game":"mods/pml220","io.cod4.startup-map":"mp_crash","io.cod4.maps":"mp_crash,mp_strike","io.cod4.maxclients":"12"},"Cmd":["+set","fs_game","mods/pml220","+set","fs_basepath","/opt/cod4-artifact","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity","+set","sv_autoupdate","0","+set","sv_maxclients","12","+exec","canonical-shared.cfg","+exec","canonical-mode.cfg","+map","mp_crash"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision" "$config_revision" "${homolog_hash_override:-$config_hash}"
+                printf '[{"Name":"/cod4-homolog","Image":"%s","State":{"Running":true},"Path":"%s","Mounts":[],"Config":{"WorkingDir":"/opt/cod4-artifact","Labels":{"org.opencontainers.image.revision":"%s","io.cod4.config.revision":"%s","io.cod4.mode":"promod","io.cod4.config.hash":"%s","io.cod4.fs-game":"mods/pml220","io.cod4.startup-map":"mp_crash","io.cod4.maps":"mp_crash,mp_strike","io.cod4.maxclients":"12"},"Cmd":["+set","fs_game","mods/pml220","+set","fs_basepath","/opt/cod4-artifact","+set","fs_localizedHeadersPath","/opt/cod4-artifact/integrity","+set","sv_autoupdate","0","+set","sv_maxclients","12","+exec","canonical-shared.cfg","+exec","canonical-mode.cfg","+map_rotate"]}}]\n' "$artifact_id" "${homolog_path:-/opt/cod4-artifact/cod4x18_dedrun}" "$revision" "$config_revision" "${homolog_hash_override:-$config_hash}"
             elif [[ "$apply_count" -ge 2 ]]; then printf '%s\n' "$old_id"
             else printf '%s\n' "$artifact_id"; fi ;;
         'docker image') cat >/dev/null; [[ ${fail_ssh:-0} == 0 ]] ;;

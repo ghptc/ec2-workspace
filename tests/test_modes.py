@@ -138,18 +138,18 @@ class PackagingTests(unittest.TestCase):
             modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
         overlay.write_text('verified upstream overlay fixture')
         modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
-        cfg = mod / 'canonical-mode.cfg'
+        cfg = mod / 'canonical-shared.cfg'
         self.assertEqual(modes.read_cfg(cfg)[0]['promod_allow_no_punkbuster'], '1')
         self.assertEqual(overlay.read_text(), 'verified upstream overlay fixture')
         service = StartupTests()
         service.setUp()
         args = service.adapt()['command']
-        self.assertLess(args.index('canonical-mode.cfg'), args.index('+map'))
+        self.assertLess(args.index('canonical-mode.cfg'), args.index('+map_rotate'))
         # A private override restores the original warning without removing assets.
         service.service['command'] += ['+set', 'promod_allow_no_punkbuster', '0']
         args = service.adapt()['command']
-        self.assertLess(args.index('canonical-mode.cfg'), args.index('promod_allow_no_punkbuster'))
-        self.assertLess(args.index('promod_allow_no_punkbuster'), args.index('+map'))
+        self.assertLess(args.index('promod_allow_no_punkbuster'), args.index('canonical-mode.cfg'))
+        self.assertLess(args.index('promod_allow_no_punkbuster'), args.index('+map_rotate'))
         self.assertEqual(args[args.index('promod_allow_no_punkbuster') + 1], '0')
         # Packaging without the optional policy leaves the canonical CFG unchanged.
         record['punkbuster_warning_policy_overlay'] = False
@@ -157,7 +157,7 @@ class PackagingTests(unittest.TestCase):
         (output / 'configuration/mode.cfg').unlink()
         (output / 'configuration').rmdir()
         modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
-        self.assertEqual(cfg.read_bytes(), self.server.read_bytes())
+        self.assertEqual(cfg.read_bytes(), (self.root / 'shared/server.cfg').read_bytes())
         self.assertEqual(modes.read_cfg(mod / 'canonical-shared.cfg')[0]['sv_pure'], '1')
         self.assertEqual(json.loads((output / 'inputs.json').read_text())['headers'], record['headers'])
 
@@ -183,6 +183,13 @@ class PackagingTests(unittest.TestCase):
                   'binary_sha256': 'retained-binary-identity'}
         (output/'inputs.json').write_text(json.dumps(record))
         revisions = ('a'*40, 'b'*40, 'c'*40)
+        self.server.write_text(self.server.read_text() + 'set g_allowVote "1"\n')
+        with self.assertRaisesRegex(ValueError, 'voting overlay'):
+            modes.package(self.root, 'promod', output, *revisions)
+        record['map_voting_policy_overlay'] = True
+        (output/'inputs.json').write_text(json.dumps(record))
+        (mod/'promod').mkdir()
+        (mod/'promod/comp.gsx').write_text('verified voting overlay fixture')
         modes.package(self.root, 'promod', output, *revisions)
         result = json.loads((output/'inputs.json').read_text())
         self.assertEqual([result[k] for k in ('engine_revision', 'config_revision', 'bot_revision')],
@@ -245,10 +252,11 @@ class StartupTests(unittest.TestCase):
         result = self.adapt()
         args = result['command']
         self.assertEqual(args[:3], ['+set', 'fs_game', 'mods/pml220'])
-        self.assertEqual(args[15:19], ['+exec','canonical-shared.cfg','+exec','canonical-mode.cfg'])
-        self.assertEqual(args[19:-2], ['+exec','server.cfg','+set','rcon_password','private$value',
+        self.assertEqual(args[15:17], ['+exec','canonical-shared.cfg'])
+        self.assertEqual(args[-3:], ['+exec', 'canonical-mode.cfg', '+map_rotate'])
+        self.assertEqual(args[17:-3], ['+exec','server.cfg','+set','rcon_password','private$value',
                                      '+exec','private.cfg'])
-        self.assertEqual(args[-2:], ['+map', 'mp_strike'])
+        self.assertEqual(args[-1:], ['+map_rotate'])
         self.assertEqual(args[12:15], ['+set','sv_maxclients','12'])
         self.assertEqual(result['volumes'], self.service['volumes'])
         self.assertEqual(self.adapt(result), result)
@@ -273,7 +281,7 @@ class StartupTests(unittest.TestCase):
         self.service['command'] = ['+exec','canonical-promod.cfg','+exec','server.cfg']
         args = self.adapt()['command']
         self.assertNotIn('canonical-promod.cfg', args)
-        self.assertEqual(args[-2:], ['+map','mp_crash'])
+        self.assertEqual(args[-1:], ['+map_rotate'])
         self.assertEqual(args.count('server.cfg'), 1)
 
     def test_existing_homolog_filesystem_command_and_runtime_preserved(self):
@@ -307,7 +315,7 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(args.count('fs_homepath'), 1)
         self.assertEqual(args[args.index('fs_homepath')+1], runtime.PERSISTENT_HOME)
         self.assertEqual(args[:3], ['+set', 'fs_game', 'mods/pml220'])
-        self.assertEqual(args[-2:], ['+map', 'mp_crash'])
+        self.assertEqual(args[-1:], ['+map_rotate'])
         self.assertEqual(self.adapt(result), result)
 
     def test_homepath_optional_and_strictly_validated(self):
@@ -343,7 +351,10 @@ class StartupTests(unittest.TestCase):
 
     def test_private_capacity_and_ambiguous_capacity(self):
         self.service['command'] += ['+set', 'sv_maxclients', '16']
-        self.assertEqual(self.adapt()['command'][12:15], ['+set','sv_maxclients','16'])
+        with self.assertRaisesRegex(ValueError, 'mode-owned'):
+            self.adapt()
+        self.service['command'][-1] = '12'
+        self.assertEqual(self.adapt()['command'][12:15], ['+set','sv_maxclients','12'])
         self.service['command'] += ['+set', 'sv_maxclients', '20']
         with self.assertRaises(ValueError):
             self.adapt()

@@ -104,6 +104,13 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
         if digest(runtime / 'integrity/addiwdheaders' / name) != expected:
             raise ValueError(f'Administrative header mismatch: {name}')
     destination = runtime / (fs_game or 'main')
+    mode_settings, _ = read_cfg(root / f'modes/{mode_id}/server.cfg')
+    if fs_game == 'mods/pml220' and mode_settings.get('g_allowVote') == '1':
+        if record.get('map_voting_policy_overlay') is not True or not (destination / 'promod/comp.gsx').is_file():
+            raise ValueError('Enabled native voting requires the verified Promod voting overlay')
+    if fs_game == 'mods/pml220' and record.get('bot_readyup_overlay') is True:
+        if not (destination / 'promod/readyup.gsx').is_file():
+            raise ValueError('Promod bot Ready Up overlay missing')
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(root / 'shared/server.cfg', destination / 'canonical-shared.cfg')
     shutil.copyfile(root / f'modes/{mode_id}/server.cfg', destination / 'canonical-mode.cfg')
@@ -111,9 +118,9 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
         overlay = destination / 'promod/servercheck.gsx'
         if not overlay.is_file() or not overlay.stat().st_size:
             raise ValueError('Promod PB warning overlay missing')
-        # canonical-mode.cfg executes before the startup map. Private CFGs can
+        # Shared defaults execute before private CFGs and the final mode rules. They can
         # explicitly restore the warning by setting this policy back to zero.
-        with (destination / 'canonical-mode.cfg').open('a') as cfg:
+        with (destination / 'canonical-shared.cfg').open('a') as cfg:
             cfg.write('\n// Prepared Promod PB warning policy; authentication unchanged.\n'
                       'set promod_allow_no_punkbuster "1"\n')
     provenance = runtime / 'configuration'

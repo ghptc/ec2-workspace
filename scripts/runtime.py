@@ -50,7 +50,7 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
     i = 0
     while i < len(args):
         command = args[i]
-        size = {'+set': 3, '+exec': 2, '+map': 2}.get(command)
+        size = {'+set': 3, '+exec': 2, '+map': 2, '+map_rotate': 1}.get(command)
         require(size and i+size <= len(args), 'Unsupported or incomplete startup command')
         group = args[i:i+size]
         require(not any(any(char in value for char in '+\r\n') for value in group[1:]),
@@ -60,6 +60,7 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
             if key.lower() == 'sv_maxclients':
                 require(not slots and re.fullmatch(r'[1-9][0-9]*', value) and int(value) <= 64,
                         'Invalid or ambiguous private capacity')
+                require(value == capacity, 'Private capacity conflicts with mode-owned sv_maxclients')
                 slots.append(value)
             elif key.lower() in {k.lower() for k in managed}:
                 require(key in managed and key not in seen, f'Ambiguous filesystem selection: {key}')
@@ -80,7 +81,7 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
         elif command == '+exec':
             if group[1] not in MANAGED_EXECS:
                 private.extend(group)
-        else:
+        elif command == '+map':
             initial_maps.append(group[1])
         i += size
     require(len(initial_maps) <= 1, 'Ambiguous startup map')
@@ -88,7 +89,10 @@ def adapt(service, image, mode_id, fingerprint, fs_game, startup, maps, capacity
     require(initial in maps.split(','), 'Private initial map is not qualified for selected mode')
     service['command'] = [item for key, value in managed.items() for item in ('+set', key, value)]
     service['command'] += ['+set', 'sv_maxclients', slots[0] if slots else capacity]
-    service['command'] += ['+exec', CANONICAL[0], '+exec', CANONICAL[1]] + private + ['+map', initial]
+    # Native exec inserts nested CFGs before the remaining command buffer. Apply
+    # mode rules after all private execs, then enter native rotation explicitly.
+    # Legacy +map arguments are validated above but no longer force startup.
+    service['command'] += ['+exec', CANONICAL[0]] + private + ['+exec', CANONICAL[1], '+map_rotate']
     service['working_dir'] = ARTIFACT_ROOT
     service['entrypoint'] = [EXECUTABLE]
     labels = service.setdefault('labels', {})
