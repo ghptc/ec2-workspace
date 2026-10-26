@@ -1,3 +1,5 @@
+> Historical, retired proposal. Use the master-based commands in the root README.
+
 # GitHub Release deployment architecture
 
 Status: implementation proposed for review; not qualified for live rollout. No EC2

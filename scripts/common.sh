@@ -84,11 +84,15 @@ docker compose --project-directory "$4" -p "$2" -f "$file" up -d --no-deps --pul
 check_health() {
     remote bash -s -- "${2:-$container}" "${3:-$port}" "${1:-}" <<'REMOTE'
 set -euo pipefail
+expected_gametype=
+case "$3" in mods/btd_alpha_001) expected_gametype=war ;; mods/pml220) expected_gametype=sd ;; esac
 for attempt in {1..90}; do
     state=$(docker inspect --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1")
     if [[ "$state" == 'true healthy' || "$state" == 'true none' ]]; then
         if response=$(timeout 3 bash -c 'exec 3<>/dev/udp/127.0.0.1/"$1"; printf "\377\377\377\377getstatus\n" >&3; dd bs=65535 count=1 <&3 2>/dev/null ' bash "$2"); then
-            if LC_ALL=C grep -aq statusResponse <<< "$response" && { [[ -z "$3" ]] || grep -Fq -- "\\fs_game\\$3\\" <<< "$response"; }; then exit 0; fi
+            if LC_ALL=C grep -aq statusResponse <<< "$response" && { [[ -z "$3" ]] || grep -Fq -- "\\fs_game\\$3\\" <<< "$response"; }; then
+                if [[ -z "$expected_gametype" ]] || { grep -Fq -- "\\g_gametype\\$expected_gametype\\" <<< "$response" && grep -Fq -- '\sv_pure\1\' <<< "$response"; }; then exit 0; fi
+            fi
         fi
     fi
     sleep 2
@@ -122,8 +126,7 @@ verify_homolog() {
         "$mode_id" "$config_hash" "$mode_fs_game" "$startup_map" "$mode_maps" "$mode_maxclients" <<< "$evidence" || {
         printf 'Homolog artifact provenance failed; nothing deployed\n' >&2; return 1;
     }
-    check_health "$mode_fs_game" cod4-homolog 28962 || return 1
-    if [[ ${release_active:-0} == 1 ]]; then check_release_effective homolog; fi
+    check_health "$mode_fs_game" cod4-homolog 28962
 }
 confirm() {
     [[ -t 0 ]] || fail 'Interactive terminal required'
@@ -145,9 +148,6 @@ deploy_image() {
         "$bot_revision" "$config_revision" "$mode_id" "$config_hash" "$ENGINE_REPOSITORY" <<< "$metadata") || fail 'Image dependency identity mismatch'
     mapfile -t startup_values <<< "$startup_contract"
     mode_fs_game=${startup_values[0]}; startup_map=${startup_values[1]}; mode_maps=${startup_values[2]}; mode_maxclients=${startup_values[3]}
-    if [[ ${release_active:-0} == 1 ]]; then
-        validate_release_image <<< "$metadata" || return 1
-    fi
     platform=$(python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; print(c["Os"]+"/"+c["Architecture"])' <<< "$metadata")
     host_platform=$(remote docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
     [[ "$platform" == "$host_platform" ]] || fail "Image platform $platform differs from host $host_platform"
@@ -159,50 +159,27 @@ deploy_image() {
     previous=$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Image"])' <<< "$inspection")
     candidate=$(image_config "$identity" artifact) || fail 'Cannot safely adapt this runtime configuration'
     previous_mode=$(runtime_mode) || return 1
-    if [[ ${release_active:-0} == 1 ]]; then
-        candidate=$(python3 -c '
-import json,sys
-m=json.load(open(sys.argv[1])); c=json.load(sys.stdin)
-c["services"][sys.argv[2]].setdefault("labels",{}).update({"io.cod4.release.tag":m["tag"], "io.cod4.release.image":m["image"]["reference"]})
-print(json.dumps(c))
-' "$release_transaction/release-manifest.json" "$service" <<< "$candidate") || return 1
-        validate_release_service <<< "$candidate" || return 1
-        verify_release_data || return 1
-        image_config "$previous" > "$release_transaction/rollback.json" || return 1
-        printf '%s\n' "$candidate" > "$release_transaction/candidate.json" || return 1
-    fi
     if [[ "$environment" == production ]]; then
         printf 'Production plan: host=aws-prod container=%s project=%s service=%s UDP=%s mode=%s\nPrevious image: %s\nApproved image: %s\nSource revision: %s\nMounts and other runtime settings retained; packaged binary/mods selected. Failure triggers rollback.\n' "$container" "$project" "$service" "$port" "$mode_id" "$previous" "$identity" "$revision"
         confirm 'Recreate cod4-production and disconnect players?' || return 1
         verify_homolog "$identity" || return 1
     fi
     # Keep rollback evidence even if this process or SSH is interrupted.
-    if [[ ${release_active:-0} != 1 ]]; then
-        image_config "$previous" > "$ROOT/.state/rollback-$environment.json"
-    fi
+    image_config "$previous" > "$ROOT/.state/rollback-$environment.json"
     # pipefail prevents applying an incomplete image transfer.
     docker image save "$identity" | remote docker image load >/dev/null || fail 'Image transfer failed; runtime was not changed'
-    if [[ ${release_active:-0} == 1 ]]; then
-        release_journal mutating 'Baseline and candidate saved before recreation' || return 1
-        trap release_interrupt INT TERM HUP
-    fi
-    if apply_runtime <<< "$candidate" && check_health "$mode_fs_game" &&
-        { [[ ${release_active:-0} != 1 ]] || check_release_effective; } && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
-        if [[ ${release_active:-0} == 1 ]]; then trap - INT TERM HUP; fi
+    if apply_runtime <<< "$candidate" && check_health "$mode_fs_game" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
         printf 'Deployed %s revision %s to %s\n' "$identity" "$revision" "$environment"
     else
         printf 'Deployment failed for %s. Restoring previous image %s.\n' "$environment" "$previous" >&2
         if apply_runtime <<< "$(image_config "$previous")" && check_health "$previous_mode" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$previous" ]]; then
-            if [[ ${release_active:-0} == 1 ]]; then release_journal rolled-back 'Baseline health verified'; fi
             printf 'Rollback healthy: %s\n' "$previous" >&2
         else
-            if [[ ${release_active:-0} == 1 ]]; then release_journal recovery-required 'Baseline restoration failed'; fi
             printf 'ROLLBACK FAILED: inspect %s immediately.\n' "$container" >&2
         fi
-        if [[ ${release_active:-0} == 1 ]]; then trap - INT TERM HUP; fi
         return 1
     fi
-    if [[ "$environment" == homolog && ${release_active:-0} != 1 ]]; then
+    if [[ "$environment" == homolog ]]; then
         confirm 'Health checks passed. Approve this exact artifact for production?' || return 1
         mkdir -p -- "$ROOT/.state"
         write_artifact_record "$identity" > "$ROOT/.state/approved.next"
@@ -231,10 +208,13 @@ resolve_master() {
     checkout_master "$CONFIG_REPOSITORY" "$stage/config"
     config_revision=$(git -C "$stage/config" rev-parse HEAD)
     select_mode
-    asset_ref=$(sha256sum "$stage/engine/bots/dependencies.json") || fail 'Dependency lock missing'
+    local dependency_lock=bots/dependencies.json
+    if [[ "$mode_fs_game" == mods/btd_alpha_001 ]]; then dependency_lock=tools/btd/dependencies.json; fi
+    asset_ref=$(sha256sum "$stage/engine/$dependency_lock") || fail 'Dependency lock missing'
     asset_ref=${asset_ref%% *}
     bot_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bot_warfare"]["commit"])' "$stage/engine/bots/dependencies.json") || fail 'Cannot read Bot Warfare revision'
-    [[ "$bot_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Invalid locked Bot Warfare revision'
+    if [[ "$mode_fs_game" == mods/btd_alpha_001 ]]; then bot_revision=none; fi
+    [[ "$bot_revision" == none || "$bot_revision" =~ ^[a-f0-9]{40}$ ]] || fail 'Invalid locked Bot Warfare revision'
     printf 'Resolved engine=%s config=%s mode=%s bot-warfare=%s\n' "$revision" "$config_revision" "$mode_id" "$bot_revision"
 }
 select_mode() {
@@ -245,22 +225,17 @@ select_mode() {
     mode_fs_game=${values[0]}; startup_map=${values[1]}; config_hash=${values[2]}; mode_maps=${values[3]}; mode_maxclients=${values[4]}
 }
 build_selected_mode() {
-    # Image building/promotion currently qualifies only Promod. Private BTD
-    # file packaging is separate; never apply Bot Warfare/FPS to another mod.
-    [[ "$mode_fs_game" == mods/pml220 ]] || fail 'No verified asset preparation recipe for selected fs_game'
-    build_promod
+    case "$mode_fs_game" in
+        mods/pml220) build_promod ;;
+        mods/btd_alpha_001) build_zombies ;;
+        *) fail 'No verified asset preparation recipe for selected fs_game' ;;
+    esac
 }
 build_promod() {
     need python3
     need gcc
     python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required on local host"' || fail 'Local Python dependency unavailable'
     local promod headers bot_repository base_tag
-    local -a build_env=() image_build_args=()
-    if [[ -n ${COD4_RELEASE_WORKSPACE:-} ]]; then
-        [[ ${SOURCE_DATE_EPOCH:-} =~ ^[0-9]+$ ]] || fail 'Release SOURCE_DATE_EPOCH required'
-        build_env=(--env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
-        image_build_args=(--build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH")
-    fi
     [[ -n ${COD4_PROMOD_ASSETS:-} && -n ${COD4_INTEGRITY_HEADERS:-} ]] || fail 'Explicit authorized COD4_PROMOD_ASSETS and COD4_INTEGRITY_HEADERS required; no historical workspace fallback'
     [[ -n ${COD4_OAT:-} && -x "$COD4_OAT/Linker" && -x "$COD4_OAT/Unlinker" ]] || fail 'COD4_OAT must contain official OAT v0.34.0 tools'
     promod=$(realpath -- "${COD4_PROMOD_ASSETS}") || fail 'Cannot resolve Promod asset path'
@@ -274,7 +249,7 @@ build_promod() {
     git -C "$stage/bots" -c advice.detachedHead=false checkout -q --detach "$bot_revision" || fail 'Cannot check out locked Bot Warfare commit'
     [[ "$(git -C "$stage/bots" rev-parse HEAD)" == "$bot_revision" && -z "$(git -C "$stage/bots" status --porcelain --untracked-files=all)" ]] || fail 'Bot Warfare checkout identity/cleanliness mismatch'
     docker image inspect "$BUILDER" "$RUNTIME_BASE" >/dev/null || fail 'Pinned local builder/runtime image missing; see README'
-    docker run "${build_env[@]}" --rm --pull never --network none --user "$(id -u):$(id -g)" \
+    docker run --rm --pull never --network none --user "$(id -u):$(id -g)" \
         --mount "type=bind,src=$stage/engine,dst=/src" --workdir /src "$BUILDER" \
         bash -euo pipefail -c 'make -j2; gcc -Wall -Wextra -Werror tests/test_bot_policy.c -o /tmp/cod4-policy; /tmp/cod4-policy; readelf -h bin/cod4x18_dedrun | grep -q "Intel 80386"' || fail 'Local compilation or engine validation failed'
     python3 "$stage/engine/tests/test_integrity_headers.py" || fail 'Local integrity validation failed'
@@ -292,13 +267,31 @@ build_promod() {
     cp -r -- "$stage/fps333/project/raw" "$stage/runtime/fps333-source"
     python3 "$OPERATIONS_SCRIPTS/modes.py" package "$stage/config" "$mode_id" "$stage/runtime" \
         "$revision" "$config_revision" "$bot_revision" || fail 'Mode configuration packaging failed'
-    if [[ -n ${COD4_RELEASE_WORKSPACE:-} ]]; then
-        # Release-only mode contract: final canonical rules win over private CFGs.
-        printf '\nset bot_enable "1"\nset bot_fill_limit "%s"\n' "$mode_maxclients" >> "$stage/runtime/mods/pml220/canonical-mode.cfg"
-    fi
     mkdir "$stage/runtime/licenses" || fail 'Cannot prepare runtime notices'
     cp -- "$stage/engine/License.md" "$stage/engine/Copyright.md" "$stage/engine/copying.md" "$stage/engine/docs/third-party-bots.md" "$stage/runtime/licenses/" || fail 'Cannot retain engine notices'
     cp -- "$stage/bots/README.md" "$stage/runtime/licenses/Bot-Warfare-README.md" || fail 'Cannot retain Bot Warfare notices'
+    package_image
+}
+build_zombies() {
+    need python3
+    [[ -n ${COD4_BTD_ASSETS:-} && -n ${COD4_INTEGRITY_HEADERS:-} ]] || fail 'Explicit authorized COD4_BTD_ASSETS and COD4_INTEGRITY_HEADERS required'
+    local source headers
+    source=$(realpath -- "$COD4_BTD_ASSETS") || fail 'Cannot resolve BTD asset path'
+    headers=$(realpath -- "$COD4_INTEGRITY_HEADERS") || fail 'Cannot resolve header path'
+    [[ -d "$source" && -d "$headers" ]] || fail 'Private original BTD package and headers required'
+    docker image inspect "$BUILDER" "$RUNTIME_BASE" >/dev/null || fail 'Pinned local builder/runtime image missing'
+    docker run --rm --pull never --network none --user "$(id -u):$(id -g)" \
+        --mount "type=bind,src=$stage/engine,dst=/src" --workdir /src "$BUILDER" \
+        bash -euo pipefail -c 'make -j2; readelf -h bin/cod4x18_dedrun | grep -q "Intel 80386"' || fail 'Local engine compilation failed'
+    python3 "$stage/engine/tools/btd/prepare.py" --source "$source" --headers "$headers" \
+        --binary "$stage/engine/bin/cod4x18_dedrun" --output "$stage/runtime" || fail 'Original BTD asset verification failed'
+    python3 "$OPERATIONS_SCRIPTS/modes.py" package "$stage/config" "$mode_id" "$stage/runtime" \
+        "$revision" "$config_revision" "$bot_revision" || fail 'Mode configuration packaging failed'
+    cp -- "$stage/engine/License.md" "$stage/engine/Copyright.md" "$stage/engine/copying.md" "$stage/runtime/licenses/"
+    package_image
+}
+package_image() {
+    local base_tag
     base_tag="ec2-workspace-base:${RUNTIME_BASE#sha256:}"
     docker image tag "$RUNTIME_BASE" "$base_tag" || fail 'Cannot tag the pinned local runtime base'
     cat > "$stage/Dockerfile" <<DOCKERFILE
@@ -311,21 +304,13 @@ WORKDIR /opt/cod4-artifact
 ENTRYPOINT ["/opt/cod4-artifact/cod4x18_dedrun"]
 LABEL org.opencontainers.image.source="$ENGINE_REPOSITORY" org.opencontainers.image.revision="$revision" io.cod4.assets.lock="$asset_ref" io.cod4.bot-warfare.revision="$bot_revision" io.cod4.config.revision="$config_revision" io.cod4.mode="$mode_id" io.cod4.config.hash="$config_hash" io.cod4.fs-game="$mode_fs_game" io.cod4.startup-map="$startup_map" io.cod4.maps="$mode_maps" io.cod4.maxclients="$mode_maxclients"
 DOCKERFILE
-    if [[ -n ${COD4_RELEASE_WORKSPACE:-} ]]; then
-        printf 'LABEL io.cod4.workspace.revision="%s"\n' "$COD4_RELEASE_WORKSPACE" >> "$stage/Dockerfile"
-        # Normalize created filesystem metadata and BuildKit image/history timestamps.
-        # shellcheck disable=SC2016
-        printf 'ARG SOURCE_DATE_EPOCH\nUSER root\nRUN find /opt/cod4-artifact -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +\nUSER 1000:1000\n' >> "$stage/Dockerfile"
-    fi
     # Keep source and Git metadata out of the Docker context and runtime image.
     printf 'engine\nconfig\nbots\nfps333\n' > "$stage/.dockerignore"
-    if [[ -n ${COD4_RELEASE_WORKSPACE:-} ]]; then
-        printf 'engine-rebuild\nruntime/runs\nruntime/evidence\n' >> "$stage/.dockerignore"
-    fi
-    docker build "${image_build_args[@]}" --pull=false --network none --iidfile "$stage/image-id" "$stage" || fail 'Local image build failed'
+    docker build --pull=false --network none --iidfile "$stage/image-id" "$stage" || fail 'Local image build failed'
     artifact=$(cat "$stage/image-id") || fail 'Image builder did not record an identity'
     docker run --rm --pull never --network none --read-only --entrypoint /bin/sh "$artifact" \
-        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/mods/pml220/promod/servercheck.gsx; test -s /opt/cod4-artifact/mods/pml220/canonical-shared.cfg; test -s /opt/cod4-artifact/mods/pml220/canonical-mode.cfg; test -s /opt/cod4-artifact/configuration/mode.cfg; test -s /opt/cod4-artifact/fps333.json; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
+        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s "/opt/cod4-artifact/$1/mod.ff"; test -s "/opt/cod4-artifact/$1/canonical-shared.cfg"; test -s "/opt/cod4-artifact/$1/canonical-mode.cfg"; test -s /opt/cod4-artifact/configuration/mode.cfg; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; if [ "$1" = mods/pml220 ]; then test -s /opt/cod4-artifact/mods/pml220/promod/servercheck.gsx; test -s /opt/cod4-artifact/fps333.json; else for name in btd_images btd_music btd_weapons; do test -s "/opt/cod4-artifact/$1/$name.iwd"; done; fi; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' sh "$mode_fs_game" || fail 'Packaged runtime validation failed'
+
 }
 write_artifact_record() {
     printf '%s %s %s %s %s %s %s\n' "$1" "$revision" "$asset_ref" "$bot_revision" "$config_revision" "$mode_id" "$config_hash"
@@ -335,18 +320,12 @@ read_approval() {
     [[ -f "$ROOT/.state/approved" ]] || fail 'No approved homolog artifact; deploy homolog first'
     [[ $(wc -l < "$ROOT/.state/approved") == 1 ]] || fail 'Malformed approval record'
     read -r artifact revision asset_ref bot_revision config_revision approved_mode config_hash extra < "$ROOT/.state/approved" || fail 'Malformed approval record'
-    [[ "$config_revision" =~ ^[a-f0-9]{40}$ && -z "$extra" && "$revision" =~ ^[a-f0-9]{40}$ && "$asset_ref" =~ ^[a-f0-9]{64}$ && "$bot_revision" =~ ^[a-f0-9]{40}$ && "$config_hash" =~ ^[a-f0-9]{64}$ && "$approved_mode" =~ ^[a-z][a-z0-9-]*$ ]] || fail 'Malformed approval record; legacy artifacts require fresh homolog qualification'
+    [[ "$config_revision" =~ ^[a-f0-9]{40}$ && -z "$extra" && "$revision" =~ ^[a-f0-9]{40}$ && "$asset_ref" =~ ^[a-f0-9]{64}$ && ( "$bot_revision" == none || "$bot_revision" =~ ^[a-f0-9]{40}$ ) && "$config_hash" =~ ^[a-f0-9]{64}$ && "$approved_mode" =~ ^[a-z][a-z0-9-]*$ ]] || fail 'Malformed approval record; legacy artifacts require fresh homolog qualification'
     [[ "$approved_mode" == "$mode_id" ]] || fail 'Requested mode differs from approved homolog artifact'
 }
 # Deployment resolution intentionally stays inside its operation subshell.
-# shellcheck disable=SC2030,SC2031
+# shellcheck disable=SC2030
 deploy() (
-    if [[ $# == 2 ]]; then
-        # shellcheck source=scripts/release-deploy.sh
-        source "$OPERATIONS_SCRIPTS/release-deploy.sh"
-        deploy_release "$@"
-        return
-    fi
     [[ $# == 1 && "$1" =~ ^[a-z][a-z0-9-]*$ ]] || fail "Usage: deploy-$environment.sh mode-id"
     mode_id=$1
     for dependency in docker python3 flock; do need "$dependency"; done
