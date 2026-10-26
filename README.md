@@ -328,3 +328,137 @@ Rollback retains the prior image/configuration identity through the existing
 rollback flow; it never edits engine binaries in a running container. A prior
 engine may retain the original read-only updater delay. These changes do not
 authorize deployment or any production/homolog/Bard service action.
+
+## Before the Dawn packaging and RCON switching design
+
+Status: private original-file packaging is supported; RCON activation and BTD
+image build/promotion are disabled. A catalog entry is not an approved artifact.
+The companion engine command is an administrative **preflight only** and reports
+unavailable without submitting or executing a deployment request.
+
+The companion config catalog owns `modes/zombies/mode.cfg` and `server.cfg`.
+Engine `tools/btd/prepare.py` verifies the owner's original Alpha 001 package,
+preserves `mod.ff`/three IWDs and notices without decompiling, and records hashes.
+`modes.py package` recognizes this explicit recipe, checks required assets and the
+binary, and does not run Promod FPS or Bot Warfare transformations. No third-party
+asset is added to a public repository or published image by this change.
+
+For a newly prepared private BTD runtime, the existing package CLI can be used
+locally with reviewed engine/config identities and `none` for the inapplicable Bot
+Warfare revision. This is a preparation record, **not** a promotable image under
+the existing mandatory Bot Warfare/FPS image contract. Image building still fails
+closed for non-Promod modes; do not invent a dependency revision to bypass it.
+
+The original vendor defaults are hash checked and appended as fixed execs to the
+shared phase. Their names must be simple BTD CFG basenames present in the asset
+manifest. Shared/vendor defaults → private CFGs (including nested execs) → final
+canonical mode → native rotation remain ordered. Original sample `server.cfg`
+with sample passwords/missing trade exec is excluded. Private admin identities,
+credentials, persistent storage and unrelated runtime fields remain private.
+
+### Existing limits verified in source
+
+- `runtime.py adapt` selects startup `fs_game`, capacity and canonical CFGs;
+  it preserves read-only root configuration, mounts, environment and credentials.
+  It does not itself validate that every incoming service is read-only.
+- Engine `fs_game` is initialization protected, and each artifact packages one
+  selected mode. A map or CFG reload cannot change immutable image identity.
+  Use recreation of the single target container and require client reconnect.
+- `game-mode.sh` delegates to the existing environment-scoped deployment path.
+  Production selects an approved exact image without rebuilding; homolog builds
+  separately. Existing `--no-deps --pull never --force-recreate` preserves the
+  boundary against unrelated services and implicit pulls.
+- Approval currently stores **one** image and production additionally verifies
+  that same image is currently running in homolog. There is no multi-mode
+  qualification registry. Do not silently relax this approval rule to make an
+  automatic round trip possible.
+- The current nonblocking deployment lock is per workstation checkout. It does
+  not serialize two different checkouts or an eventual host-local RCON worker.
+- Existing rollback saves the previous configuration and checks its health on
+  ordinary failures. It has no completed durable recovery protocol for a crash
+  after recreation starts. A saved file alone is not crash-safe activation.
+- These scripts operate from an interactive workstation via SSH and include image
+  transfer/build paths. Calling them directly from game input would violate the
+  intended trust and no-build boundary.
+
+### Proposed transaction before enabling activation
+
+The minimum viable bridge is a narrow host-owned execution path reusing the
+existing deployment functions, with a typed mode-ID request and environment fixed
+by the operator. It must not give the container a Docker socket, shell, SSH key,
+build capability or a general-purpose remote command API. No bridge is added now.
+A host-local bounded Unix socket is a candidate transport; an unauthenticated
+writable-home request file is not. Transport endpoint identity, peer/container
+identity and permissions require local validation before adoption.
+
+Engine power 100 is necessary but insufficient for host authorization: original
+GSC can execute console commands, and system/GSC and legacy UDP RCON share default
+invoker context. Add nonforgeable authenticated ingress context for a future
+activation handler and clear it on every exit. A plain power check, configurable
+cvar or writable request file cannot stand in for authenticated RCON origin.
+Existing password/Source RCON authentication remains the ingress authority; no
+second remote password or privilege role is proposed.
+
+After that boundary is validated, the host path must:
+
+1. Take a single host-owned nonblocking lock for the pinned environment/container.
+   Return busy for concurrent requests; do not mutate or start a second operation.
+2. Resolve only exact registered IDs (`zombies`, `promod`, and `hardcore` only after
+   separate qualification) from an owner-controlled, per-environment artifact
+   allowlist. Reject absent/unqualified IDs with a reason before runtime writes.
+   No paths, shell text, URLs, tags, argv or environment names come from RCON.
+3. Verify the selected immutable image is already local, its source/config/asset
+   identities and valid homolog evidence. No fetch, download, image load, build
+   or image publishing is permitted on this request path. Multiple approved modes
+   require an explicitly reviewed extension to today's single-live-homolog rule;
+   the current rule remains authoritative until then.
+4. Snapshot exact prior image/config/private mounts, rootfs policy and credentials.
+   Validate `read_only=true` and no shadowing mounts for both candidate and prior
+   runtime. Retain private bytes and volume identities rather than generating
+   replacements from public configuration.
+5. Persist a restrictive transaction record with previous/target image and phase
+   before applying any change; atomically replace and durably flush it. A retry
+   or worker restart must recover the same transaction before accepting another.
+6. Recreate only the pinned service using the existing no-dependency/no-pull path.
+   Rootfs stays read-only, writable persistent volumes stay mounted, and no
+   homolog/production/Bard or unrelated service is touched as a side effect.
+7. Verify exact container image/provenance, `ReadonlyRootfs=true`, retained mounts,
+   running state, protocol status, target `fs_game`/mode/gametype and map readiness.
+   BTD artifact qualification must already include real native zombie combat;
+   `getstatus`, `CS_ACTIVE` and an idle map are insufficient gameplay evidence.
+8. Commit the target as active only after health passes. Otherwise recreate the
+   exact previous runtime, verify rollback health and report failure. If rollback
+   fails, retain the transaction and reject further requests for operator recovery.
+
+The response must distinguish denied/unavailable, accepted pending, busy, healthy
+active, rolled back and recovery required. The initiating UDP RCON connection
+cannot survive container recreation. Return an operation ID before disconnection;
+a later authenticated status query reports the persisted result. Never print
+“switched” on request receipt or before target health checks.
+
+### Qualification and remaining work
+
+Local tests cover catalog selection, BTD original-file packaging, tampered/missing
+assets, invalid default paths, handler powers and malformed/unavailable requests.
+Real loopback processes cover all 15 original maps, private conflicts, credentials,
+purity, eight headers and process restart. Generated `read_only` preservation is
+checked; an actual Docker rootfs or reconnect transition is not claimed.
+Existing operations mocks cover rollback success/failure, exact-image promotion,
+mount retention and unrelated-service isolation; no SSH or Docker daemon is used.
+
+Before activation: qualify native BTD waves/navigation/damage/win/loss with a real
+client; qualify its separate image recipe and dependency labels; review multi-mode
+homolog approval; validate authenticated request transport, host-wide locking,
+crash recovery, container restart/reconnect and failure rollback. Promod→Zombies
+and Zombies→Promod are not implemented or certified. Hardcore is not registered.
+No EC2 access, live service changes, deployment, approval changes or merge occurred.
+
+Rollback of this staged change is ordinary commit reverts. Existing Promod
+artifacts and approval records remain intact, and no private game asset is deleted.
+
+Evidence: BTD local runtime passed 53 startup/map/preflight checks in
+`/tmp/cod4-btd-qualified-biebk8zp/results.json`; Promod passed 53 regression checks
+in `/tmp/cod4x-promod-integration-9aouxfu4/results.json`. Workspace tests passed
+22 Python tests and the existing complete operations mock suite. The candidate
+catalog and engine changes were tested together; these results do not approve an
+image or validate an active RCON bridge. Full private logs/assets remain outside Git.

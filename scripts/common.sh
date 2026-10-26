@@ -245,8 +245,8 @@ select_mode() {
     mode_fs_game=${values[0]}; startup_map=${values[1]}; config_hash=${values[2]}; mode_maps=${values[3]}; mode_maxclients=${values[4]}
 }
 build_selected_mode() {
-    # The engine asset tool currently qualifies only this runtime. Discovery is
-    # generic; never apply its Bot Warfare/FPS transformations to another mod.
+    # Image building/promotion currently qualifies only Promod. Private BTD
+    # file packaging is separate; never apply Bot Warfare/FPS to another mod.
     [[ "$mode_fs_game" == mods/pml220 ]] || fail 'No verified asset preparation recipe for selected fs_game'
     build_promod
 }
