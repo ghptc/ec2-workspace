@@ -86,3 +86,25 @@ insufficient connection evidence. The operator subsequently instructed the agent
 to stop opening CoD4 MP and continue other work. No further graphical launches or
 inputs are authorized by this investigation. Preserve the baseline and obtain
 real reproduction evidence before any protocol correction.
+
+## Public client source findings
+
+Read-only inspection of official public client revision
+`17182c7bf04b859dea5c0db4acdb0b83c28d6dd2` establishes that:
+
+- The [parser](https://github.com/callofduty4x/CoD4x_Client_pub/blob/17182c7bf04b859dea5c0db4acdb0b83c28d6dd2/src/cl_main.c#L7235)
+  advances the received command sequence and stores commands in a 128-slot ring.
+- The [outbound acknowledgement](https://github.com/callofduty4x/CoD4x_Client_pub/blob/17182c7bf04b859dea5c0db4acdb0b83c28d6dd2/src/cl_main.c#L4285)
+  reports that parsed sequence; the CGame execution loop maintains a separate sequence.
+- The [reported error check](https://github.com/callofduty4x/CoD4x_Client_pub/blob/17182c7bf04b859dea5c0db4acdb0b83c28d6dd2/src/cl_main.c#L9124)
+  fires when the requested command is at least 128 behind the parsed sequence.
+  The error alone therefore does not establish packet loss.
+- The [gamestate parser](https://github.com/callofduty4x/CoD4x_Client_pub/blob/17182c7bf04b859dea5c0db4acdb0b83c28d6dd2/src/cl_main.c#L8289)
+  sets a received baseline. An existing commented execution-sequence bypass warns
+  of mod compatibility breakage; it is not an acceptable demonstrated correction.
+
+This revision identifies itself as client 21.8, whereas the isolated installed
+client reported 21.1; no 21.1 tag was available in this checkout. Do not equate
+their implementations. The evidence supports testing execution lag during loading,
+but establishes neither the incident's trigger nor compatibility of a proposed fix.
+No client binary or protected vendor asset was decompiled.
