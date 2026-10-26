@@ -2,6 +2,9 @@
 
 See [master deployment and Zombies readiness](docs/zombies-readiness.md) for
 required GitHub checks, local evidence and real-client qualification blockers.
+The current [mission matrix](docs/zombies-mission.md),
+[client investigation](docs/zombies-client-investigation.md) and independent
+[mode-switch review](docs/zombies-mode-review.md) track outstanding delivery work.
 
 ```bash
 ./scripts/deploy-homolog.sh promod
