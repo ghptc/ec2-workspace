@@ -1,15 +1,18 @@
 # Master deployment and Zombies readiness — 2026-10-26
 
-The restoration is proposed in [workspace PR #12](https://github.com/ghptc/ec2-workspace/pull/12),
+The restoration was delivered in [workspace PR #12](https://github.com/ghptc/ec2-workspace/pull/12),
 [engine PR #18](https://github.com/ghptc/cod4x-server/pull/18), and
 [configuration PR #9](https://github.com/ghptc/cod4-config-server/pull/9).
-They require owner review and manual merge. Nothing was deployed or merged.
-Production, homolog, Bard, EC2, existing private mounts and approval/rollback
-records were not changed.
+GitHub inspection during the subsequent mission confirms all three merged on
+2026-10-26 at 20:32Z. The test evidence below describes the earlier preparation
+task, which performed no deployment or merge and changed no production, homolog,
+Bard, EC2, existing private mounts or approval/rollback records. See the current
+[mission decisions and acceptance matrix](zombies-mission.md); these historical
+tests do not qualify the reported real-client connection failure or gameplay.
 
 ## Source reconciliation and deployment
 
-Fetched protected master in all three repositories:
+Protected masters inspected during the earlier preparation task:
 
 | Repository | Master inspected |
 | --- | --- |
@@ -32,7 +35,7 @@ explicitly `none`; its asset-lock provenance is the original BTD dependency lock
 The unused release source, workflow and tests were moved byte-for-byte into
 `docs/releases/retired/`, preserving evidence. Version arguments are rejected.
 The manual workspace release-publication workflow was also disabled on GitHub
-while the archival PR awaits review. No releases, Apps, self-hosted runners,
+before the archival PR merged. No releases, Apps, self-hosted runners,
 registries, VMs or additional runtime infrastructure were created.
 
 ## Required CI and effective protection
@@ -63,7 +66,8 @@ The required hosted checks passed:
 
 The final hosted engine job uses the existing linked native harness runners and
 installs multilib/native NASM without a redundant foreign-architecture index.
-Check each PR's latest head before merging; documentation follow-ups rerun CI.
+These are historical check results; verify required checks on each new PR's final
+head before merging.
 
 ## Actual local evidence
 
@@ -104,8 +108,8 @@ are rejected by the original mod; synthetic admission does not complete real
 client asset/message acknowledgments. No workaround changes the original mod.
 The original wave AI is preserved, but its combat behavior is not certified.
 
-Before supervised deployment: review and manually merge the three follow-up PRs
-with their required checks green; fetch workspace master; supply authorized local
+The three follow-up PRs have merged. Before supervised deployment, fetch current
+protected masters and supply authorized local
 BTD inputs and headers and the existing pinned builder/runtime images. Retain the
 existing runtime's private mount/argv contract; conflicting capacity, unsupported
 startup maps/commands or artifact-shadowing mounts fail closed and require review,
