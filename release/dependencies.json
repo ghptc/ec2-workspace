@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "engine": "869c835f2d0097059cbc76616eee1b0b477a99e7",
+  "config": "cee09c9001937170bcd521b75a43d1f610978f1a",
+  "bot_warfare": "7b52b462e40fa68287b9e54602e52da83b17766c",
+  "engine_dependencies_sha256": "a958f7fa4fd8d7165c01701e1a1c6e5180ec837ae4fc92dbe3fd7b4c2463ff93",
+  "builder": "sha256:92528811226fabd05fee63074e22b7b5afd0fa9d63d5994bd3a8f74c8543cbfe",
+  "runtime_base": "sha256:7050ddb6927fdf0b6703d605f23ebcf2bfb14553c1db01173ec0035294995770"
+}
