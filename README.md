@@ -5,6 +5,8 @@ required GitHub checks, local evidence and real-client qualification blockers.
 The current [mission matrix](docs/zombies-mission.md),
 [client investigation](docs/zombies-client-investigation.md) and independent
 [mode-switch review](docs/zombies-mode-review.md) track outstanding delivery work.
+For the operator-launched P0 reproduction, use the read-only
+[supervised diagnostic session](docs/zombies-supervised-session.md).
 
 ```bash
 ./scripts/deploy-homolog.sh promod
