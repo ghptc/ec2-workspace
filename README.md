@@ -20,7 +20,7 @@ System SSH includes are bypassed without changing them.
 
 Homolog fetches `origin/master` from both canonical repositories,
 [engine](https://github.com/ghptc/cod4x-server) and
-[configuration](https://github.com/ghptc/cod4-promod-server), into clean detached
+[configuration](https://github.com/ghptc/cod4-config-server), into clean detached
 checkouts under ignored `.state/`. Engine and configuration SHAs, pinned Bot Warfare
 revision and dependency lock are recorded with the immutable image identity.
 Python 3.11+ and GCC run integrity validation on the local host; the pinned builder
@@ -47,15 +47,70 @@ and editable menu sources accompany the private runtime. No proprietary assets
 or generated files belong in Git or public registries. Graphical client FPS and
 movement qualification remains required before approval.
 
-Canonical `config/promod.cfg` is packaged as `canonical-promod.cfg` within the
-mod VFS and executed before inherited runtime arguments/private configuration.
-Private settings retain precedence; no private configuration file is overwritten.
+The configuration checkout is a clean, detached exact SHA from canonical master.
+`scripts/modes.py` validates every `modes/<id>/` directory, its two required CFGs,
+and `shared/server.cfg`. IDs are literal, case-sensitive directory names; there
+are no aliases or fallback modes. Missing files, symlinks, unsafe CFG syntax,
+credentials, duplicate keys, undocumented shared overrides, invalid rotations,
+and purity other than `1` fail before runtime mutation. Only the selected mode
+is packaged; discovery does not require other modes' assets.
+
+`mode.cfg` supplies startup-only `fs_game`; it is parsed as data, never executed
+after filesystem initialization. Runtime argv selects filesystem paths first,
+then executes `canonical-shared.cfg`, then `canonical-mode.cfg`, then inherited
+private CFG execs in their existing order, and finally starts a qualified map.
+The first rotation map is the default; a compatible explicit private initial map
+is retained. Duplicate filesystem arguments, unsupported startup commands,
+mounts shadowing any artifact path and unqualified initial maps are rejected.
+Private files are not rewritten. Native `+set` arguments are retained; the engine
+processes them early, so use the existing private CFG execs for late overrides.
+`+set sv_pure 0` is rejected. Capacity is also passed at startup because
+`sv_maxclients` is initialization-only; a valid explicit private capacity retains
+precedence. Slot limits outside the engine range (1–64) are rejected.
+
+Mode switching uses the same locked deployment path as deploy-homolog/production,
+including container recreation, homolog approval and rollback. It never decides
+that a matching `fs_game` alone means the requested mode is already active.
+Removing a mode from a later catalog has no effect on immutable running or
+approved artifacts; production never fetches the current catalog.
+
+The only qualified asset preparation recipe remains the engine's `mods/pml220`
+Promod pipeline. It retains FPS 333 rebuilding, Bot Warfare and all eight IWD
+headers. A different `fs_game` is discovered but rejected for build until its
+asset preparation is reviewed; no Promod transforms are reused for other mods.
+No Zombies or Hardcore configuration/assets are supplied by this change.
 The canonical policy is `match_mr12_pb`, with pure enabled. The merged optional
 PunkBuster warning overlay is deliberately not enabled: missing native PB retains
 its warning and requires operator qualification, not an anticheat bypass.
-`inputs.json` records binary, configuration, dependency and FPS provenance; image
-labels and the approval record include both source revisions. Production reuses
-that identity without fetching or rebuilding.
+`inputs.json` records binary, mode ID, startup selection, all three CFG hashes,
+engine/config/bot revisions, dependencies and FPS provenance. Image labels bind
+mode, aggregate CFG hash, source revisions, startup map and qualified rotation
+maps to the immutable image. Prepared/approved records contain seven fields:
+image ID, engine SHA, asset lock hash, bot SHA, config SHA, mode ID, CFG hash.
+The aggregate hash is SHA-256 of the shared, metadata and mode-server SHA-256
+hex digests, each followed by a newline, in that order. Production verifies the
+record against image labels and the actual homolog command before promotion.
+Production reuses that identity without fetching or rebuilding.
+
+Legacy five-field approvals lack mode/hash identity and are rejected with a
+fresh-homolog-qualification message. Existing containers, private state and
+rollback configuration remain untouched; do not discard historical images or
+approvals. Requalify a new artifact explicitly before promoting with this branch.
+
+Tests use local Git fixtures and mocked Docker/SSH only. Run:
+
+```bash
+for file in scripts/*.sh tests/*.sh; do bash -n "$file" || exit 1; done
+shellcheck -x scripts/*.sh tests/*.sh
+bash tests/operations.sh
+git diff --check
+```
+
+Adoption prerequisite: at review time canonical configuration master was
+`fe772fd08a05c66d1150882aefdcadedf66ea2db` (PR #1), which still has the old layout.
+Configuration PR #2 must be merged before a new homolog build can resolve the
+modular catalog from master. This consumer fails closed while it is absent;
+it never substitutes a local feature branch or the historical monolithic CFG.
 
 After startup and UDP 28962 checks, homolog requests interactive approval and
 records the exact image ID/references in private `.state/approved`. Production

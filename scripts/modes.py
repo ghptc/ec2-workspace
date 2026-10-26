@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Read the native CFG catalog; never execute configuration as code."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+
+ID = r'[a-z][a-z0-9-]*'
+FS_GAME = r'(?:mods/[A-Za-z0-9_-]+)?'
+SETTING = re.compile(r'set ([A-Za-z_][A-Za-z0-9_]*) "([^"\\;\x00-\x1f\x7f]*)"')
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read_cfg(path):
+    if path.is_symlink() or not path.is_file() or not path.stat().st_size:
+        raise ValueError(f'Missing, empty or symlinked configuration: {path}')
+    settings, overrides = {}, set()
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith('// Override shared: '):
+            overrides.add(line.removeprefix('// Override shared: '))
+        if not line or line.startswith('//'):
+            continue
+        match = SETTING.fullmatch(line)
+        if not match:
+            raise ValueError(f'Unsupported CFG syntax: {path}')
+        key, value = match.groups()
+        if key.lower() in {k.lower() for k in settings}:
+            raise ValueError(f'Duplicate setting: {key}')
+        if re.search(r'password|rcon|token|secret|credential', key, re.I):
+            raise ValueError(f'Private setting in public configuration: {key}')
+        settings[key] = value
+    return settings, overrides
+
+
+def select(root, requested):
+    if not re.fullmatch(ID, requested):
+        raise ValueError('Invalid mode identifier')
+    for directory in (root / 'shared', root / 'modes'):
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f'Missing or symlinked catalog directory: {directory}')
+    shared_path = root / 'shared/server.cfg'
+    shared, _ = read_cfg(shared_path)
+    catalog = {}
+    for directory in sorted((root / 'modes').iterdir(), key=lambda p: p.name.encode()):
+        if directory.is_symlink() or not directory.is_dir() or not re.fullmatch(ID, directory.name):
+            raise ValueError(f'Invalid mode directory: {directory.name}')
+        metadata_path, server_path = directory / 'mode.cfg', directory / 'server.cfg'
+        metadata, _ = read_cfg(metadata_path)
+        mode, overrides = read_cfg(server_path)
+        if set(metadata) != {'fs_game'} or not re.fullmatch(FS_GAME, metadata['fs_game']):
+            raise ValueError(f'Invalid startup metadata: {directory.name}')
+        if any(key.lower().startswith('fs_') for key in shared | mode):
+            raise ValueError('Filesystem settings belong only in mode.cfg')
+        shared_keys = {key.lower(): key for key in shared}
+        for key in mode:
+            if key.lower() in shared_keys and key not in overrides:
+                raise ValueError(f'Undocumented shared override: {key}')
+            if key.lower() in shared_keys and key != shared_keys[key.lower()]:
+                raise ValueError(f'Inconsistent setting capitalization: {key}')
+        effective = shared | mode
+        if not all(effective.get(k) for k in ('sv_hostname', 'g_gametype', 'sv_mapRotation')):
+            raise ValueError(f'Missing required mode settings: {directory.name}')
+        if not re.fullmatch(r'[1-9][0-9]*', effective.get('sv_maxclients', '')) or int(effective['sv_maxclients']) > 64:
+            raise ValueError('Invalid slot limit')
+        if effective.get('sv_pure') != '1':
+            raise ValueError('Supported runtime requires sv_pure=1')
+        rotation = effective['sv_mapRotation'].split()
+        if not rotation or len(rotation) % 4:
+            raise ValueError('Invalid map rotation')
+        for i in range(0, len(rotation), 4):
+            if rotation[i] != 'gametype' or rotation[i+2] != 'map' or not all(
+                re.fullmatch(r'[A-Za-z0-9_]+', rotation[j]) for j in (i+1, i+3)
+            ):
+                raise ValueError('Invalid map rotation group')
+        if rotation[1] != effective['g_gametype']:
+            raise ValueError('Initial game type differs from rotation')
+        paths = (shared_path, metadata_path, server_path)
+        hashes = {str(p.relative_to(root)): digest(p) for p in paths}
+        fingerprint = hashlib.sha256(('\n'.join(hashes.values())+'\n').encode()).hexdigest()
+        catalog[directory.name] = (metadata['fs_game'], rotation[3], fingerprint,
+                                   ','.join(dict.fromkeys(rotation[3::4])), effective['sv_maxclients'], hashes)
+    if requested not in catalog:
+        raise ValueError(f'Unknown mode: {requested}')
+    return catalog[requested]
+
+
+def package(root, mode_id, runtime, engine_revision, config_revision, bot_revision):
+    fs_game, startup_map, fingerprint, maps, _, hashes = select(root, mode_id)
+    record_path = runtime / 'inputs.json'
+    record = json.loads(record_path.read_text())
+    if not set(maps.split(',')).issubset(record['maps']):
+        raise ValueError('Rotation contains maps not qualified by asset preparation')
+    # The engine tool verifies hashes; require all eight outputs to survive packaging.
+    expected_headers = {'jcod4x_00.dat'} | {f'localized_english_iw{i:02}.dat' for i in range(7)}
+    if set(record['headers']) != expected_headers:
+        raise ValueError('Expected all eight administrative IWD headers')
+    for name, expected in record['headers'].items():
+        if digest(runtime / 'integrity/addiwdheaders' / name) != expected:
+            raise ValueError(f'Administrative header mismatch: {name}')
+    destination = runtime / (fs_game or 'main')
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / 'shared/server.cfg', destination / 'canonical-shared.cfg')
+    shutil.copyfile(root / f'modes/{mode_id}/server.cfg', destination / 'canonical-mode.cfg')
+    provenance = runtime / 'configuration'
+    provenance.mkdir()
+    shutil.copyfile(root / f'modes/{mode_id}/mode.cfg', provenance / 'mode.cfg')
+    fps = json.loads((runtime / 'fps333.json').read_text())
+    if digest(destination / 'mod.ff') != fps['mod_ff_sha256']:
+        raise ValueError('Rebuilt FPS fastfile differs')
+    record.update(engine_revision=engine_revision, config_revision=config_revision,
+                  bot_revision=bot_revision, mode_id=mode_id, fs_game=fs_game,
+                  startup_map=startup_map, config_hash=fingerprint,
+                  config_files=hashes, fps333=fps)
+    record_path.write_text(json.dumps(record, indent=2)+'\n')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation', choices=('select', 'package'))
+    parser.add_argument('root', type=Path)
+    parser.add_argument('mode')
+    parser.add_argument('packaging', nargs='*')
+    args = parser.parse_args()
+    try:
+        if args.operation == 'select':
+            print('\n'.join(select(args.root, args.mode)[:5]))
+        else:
+            if len(args.packaging) != 4:
+                parser.error('package requires runtime, engine SHA, config SHA and bot SHA')
+            package(args.root, args.mode, Path(args.packaging[0]), *args.packaging[1:])
+    except (ValueError, OSError, KeyError) as exc:
+        parser.exit(1, f'Configuration error: {exc}\n')
+
+
+if __name__ == '__main__':
+    main()
