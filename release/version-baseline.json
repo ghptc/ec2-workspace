@@ -1,0 +1,5 @@
+{
+  "workspace": "45d0aaf65aae95c1e2699bde5aac7a1dcd2d36e5",
+  "initial_version": "v0.1.0-rc.1",
+  "note": "Historical commits before release lifecycle adoption retain their original messages. New workspace commits must use Conventional Commits."
+}

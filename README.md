@@ -1,3 +1,23 @@
+# Immutable GitHub Releases (proposed migration)
+
+Explicit-version deployments are implemented on this branch:
+
+```bash
+./scripts/deploy-homolog.sh promod v0.1.0-rc.1
+./scripts/deploy-production.sh promod v0.1.0
+```
+
+These commands verify attested immutable GitHub Releases and reuse the exact
+published image. Production requires stable promotion evidence. They do not use
+mutable master or local approvals. Publication and rollout are not yet qualified;
+repository protection/private-package/runner prerequisites remain unconfigured.
+See [architecture and release gates](docs/releases/architecture.md) and
+[migration inventory and recovery](docs/releases/migration.md) before adoption.
+
+The one-argument commands and historical qualification notes below describe the
+preserved legacy compatibility path. They remain available until the release
+workflow is qualified. No EC2/service changes or real releases accompany this PR.
+
 # CoD4 remote operations
 
 ```bash
