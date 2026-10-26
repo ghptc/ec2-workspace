@@ -245,14 +245,29 @@ class StartupTests(unittest.TestCase):
         result = self.adapt()
         args = result['command']
         self.assertEqual(args[:3], ['+set', 'fs_game', 'mods/pml220'])
-        self.assertEqual(args[12:16], ['+exec','canonical-shared.cfg','+exec','canonical-mode.cfg'])
-        self.assertEqual(args[16:-2], ['+exec','server.cfg','+set','rcon_password','private$value',
+        self.assertEqual(args[15:19], ['+exec','canonical-shared.cfg','+exec','canonical-mode.cfg'])
+        self.assertEqual(args[19:-2], ['+exec','server.cfg','+set','rcon_password','private$value',
                                      '+exec','private.cfg'])
         self.assertEqual(args[-2:], ['+map', 'mp_strike'])
-        self.assertEqual(args[9:12], ['+set','sv_maxclients','12'])
+        self.assertEqual(args[12:15], ['+set','sv_maxclients','12'])
         self.assertEqual(result['volumes'], self.service['volumes'])
         self.assertEqual(self.adapt(result), result)
         self.assertEqual(self.adapt(fs_game='')['command'][:3], ['+set','fs_game',''])
+
+    def test_managed_updater_opt_out(self):
+        self.service['read_only'] = True
+        result = self.adapt()
+        args = result['command']
+        self.assertEqual(args[9:12], ['+set', 'sv_autoupdate', '0'])
+        self.assertTrue(result['read_only'])
+        self.assertEqual(result['volumes'], self.service['volumes'])
+        self.assertEqual(self.adapt(result), result)
+        for extra in (['+set', 'sv_autoupdate', '1'], ['+set', 'SV_AUTOUPDATE', '0'],
+                      ['+set', 'sv_autoupdate', '0', '+set', 'sv_autoupdate', '0']):
+            service = copy.deepcopy(self.service)
+            service['command'] += extra
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                self.adapt(service)
 
     def test_default_initial_map_and_legacy_exec_migration(self):
         self.service['command'] = ['+exec','canonical-promod.cfg','+exec','server.cfg']
@@ -328,7 +343,7 @@ class StartupTests(unittest.TestCase):
 
     def test_private_capacity_and_ambiguous_capacity(self):
         self.service['command'] += ['+set', 'sv_maxclients', '16']
-        self.assertEqual(self.adapt()['command'][9:12], ['+set','sv_maxclients','16'])
+        self.assertEqual(self.adapt()['command'][12:15], ['+set','sv_maxclients','16'])
         self.service['command'] += ['+set', 'sv_maxclients', '20']
         with self.assertRaises(ValueError):
             self.adapt()
