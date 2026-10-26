@@ -136,9 +136,12 @@ cat > "$test_root/source/tools/bots/prepare.py" <<'PY'
 import argparse,pathlib,json,hashlib
 p=argparse.ArgumentParser()
 for key in ('promod','bot-warfare','headers','binary','output'): p.add_argument('--'+key,required=True)
+p.add_argument('--allow-no-punkbuster', action='store_true', required=True)
 a=p.parse_args(); out=pathlib.Path(a.output); out.mkdir(); (out/'cod4x18_dedrun').write_text('fixture'); (out/'mods/pml220').mkdir(parents=True); (out/'integrity/addiwdheaders').mkdir(parents=True); headers={'jcod4x_00.dat':hashlib.sha256(b'header').hexdigest()} | {f'localized_english_iw{i:02}.dat':hashlib.sha256(b'header').hexdigest() for i in range(7)}
 for name in headers: (out/'integrity/addiwdheaders'/name).write_bytes(b'header')
-(out/'inputs.json').write_text(json.dumps({'maps':['mp_crash','mp_strike'], 'headers':headers}))
+(out/'mods/pml220/promod').mkdir()
+(out/'mods/pml220/promod/servercheck.gsx').write_text('verified upstream overlay fixture')
+(out/'inputs.json').write_text(json.dumps({'maps':['mp_crash','mp_strike'], 'headers':headers, 'punkbuster_warning_policy_overlay':a.allow_no_punkbuster}))
 PY
 git -C "$test_root/source" add bots tools docs License.md Copyright.md copying.md
 git -C "$test_root/source" -c user.name=Test -c user.email=test@example.invalid commit -qm 'test: fixture'
@@ -228,10 +231,12 @@ build_promod >/dev/null
 [[ "$artifact" == "$artifact_id" ]]
 [[ $(cat "$stage/runtime/mods/pml220/mod.ff") == patched333 ]]
 cmp "$stage/config/shared/server.cfg" "$stage/runtime/mods/pml220/canonical-shared.cfg"
-cmp "$stage/config/modes/promod/server.cfg" "$stage/runtime/mods/pml220/canonical-mode.cfg"
+grep -qx 'set promod_allow_no_punkbuster "1"' "$stage/runtime/mods/pml220/canonical-mode.cfg"
+[[ -s "$stage/runtime/mods/pml220/promod/servercheck.gsx" ]]
+grep -q 'test -s /opt/cod4-artifact/mods/pml220/promod/servercheck.gsx' "$test_root/docker.log"
 cmp "$stage/config/modes/promod/mode.cfg" "$stage/runtime/configuration/mode.cfg"
 [[ $(find "$stage/runtime/mods" -mindepth 1 -maxdepth 1 -type d | wc -l) == 1 ]]
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["mode_id"]=="promod" and len(d["config_files"])==3 and len(d["headers"])==8' "$stage/runtime/inputs.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["punkbuster_warning_policy_overlay"] is True and d["mode_id"]=="promod" and len(d["config_files"])==3 and len(d["headers"])==8' "$stage/runtime/inputs.json"
 grep -q '^COPY runtime/' "$stage/Dockerfile"
 grep -q '^engine$' "$stage/.dockerignore"
 if grep -q 'python3' "$test_root/docker.log"; then exit 1; fi

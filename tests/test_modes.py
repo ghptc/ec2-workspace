@@ -118,6 +118,49 @@ class CatalogTests(unittest.TestCase):
 class PackagingTests(unittest.TestCase):
     setUp = CatalogTests.setUp
 
+    def test_promod_warning_policy_startup_and_disable(self):
+        output = self.root / 'runtime'
+        headers = output / 'integrity/addiwdheaders'
+        headers.mkdir(parents=True)
+        names = {'jcod4x_00.dat'} | {f'localized_english_iw{i:02}.dat' for i in range(7)}
+        for name in names:
+            (headers / name).write_bytes(b'header')
+        mod = output / 'mods/pml220'
+        (mod / 'promod').mkdir(parents=True)
+        overlay = mod / 'promod/servercheck.gsx'
+        (mod / 'mod.ff').write_bytes(b'fastfile')
+        (output / 'fps333.json').write_text(json.dumps({'mod_ff_sha256': modes.digest(mod / 'mod.ff')}))
+        record = {'maps': ['mp_crash', 'mp_strike'],
+                  'headers': {name: modes.digest(headers / name) for name in names},
+                  'punkbuster_warning_policy_overlay': True}
+        (output / 'inputs.json').write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, 'overlay missing'):
+            modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
+        overlay.write_text('verified upstream overlay fixture')
+        modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
+        cfg = mod / 'canonical-mode.cfg'
+        self.assertEqual(modes.read_cfg(cfg)[0]['promod_allow_no_punkbuster'], '1')
+        self.assertEqual(overlay.read_text(), 'verified upstream overlay fixture')
+        service = StartupTests()
+        service.setUp()
+        args = service.adapt()['command']
+        self.assertLess(args.index('canonical-mode.cfg'), args.index('+map'))
+        # A private override restores the original warning without removing assets.
+        service.service['command'] += ['+set', 'promod_allow_no_punkbuster', '0']
+        args = service.adapt()['command']
+        self.assertLess(args.index('canonical-mode.cfg'), args.index('promod_allow_no_punkbuster'))
+        self.assertLess(args.index('promod_allow_no_punkbuster'), args.index('+map'))
+        self.assertEqual(args[args.index('promod_allow_no_punkbuster') + 1], '0')
+        # Packaging without the optional policy leaves the canonical CFG unchanged.
+        record['punkbuster_warning_policy_overlay'] = False
+        (output / 'inputs.json').write_text(json.dumps(record))
+        (output / 'configuration/mode.cfg').unlink()
+        (output / 'configuration').rmdir()
+        modes.package(self.root, 'promod', output, 'engine', 'config', 'bots')
+        self.assertEqual(cfg.read_bytes(), self.server.read_bytes())
+        self.assertEqual(modes.read_cfg(mod / 'canonical-shared.cfg')[0]['sv_pure'], '1')
+        self.assertEqual(json.loads((output / 'inputs.json').read_text())['headers'], record['headers'])
+
     def test_selected_package_preserves_assets_and_binds_provenance(self):
         other = self.root / 'modes/other'
         other.mkdir()

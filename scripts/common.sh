@@ -248,7 +248,9 @@ build_promod() {
     python3 -m unittest discover -s "$stage/engine/tests" -p 'test_fps_menu.py' || fail 'FPS policy validation failed'
     python3 -m unittest discover -s "$stage/engine/tests" -p 'test_punkbuster_policy.py' || fail 'PB policy validation failed'
     python3 "$stage/engine/tools/bots/prepare.py" --promod "$promod" --bot-warfare "$stage/bots" \
-        --headers "$headers" --binary "$stage/engine/bin/cod4x18_dedrun" --output "$stage/runtime" || fail 'Runtime assets failed verification'
+        --headers "$headers" --binary "$stage/engine/bin/cod4x18_dedrun" --output "$stage/runtime" \
+        --allow-no-punkbuster || fail 'Runtime assets failed verification'
+    [[ -s "$stage/runtime/mods/pml220/promod/servercheck.gsx" ]] || fail 'Promod PB warning overlay missing'
     python3 "$stage/engine/tools/promod/fps333.py" --promod "$promod/mod.ff" \
         --oat "$COD4_OAT" --output "$stage/fps333" || fail 'FPS menu rebuild failed'
     cp -- "$stage/fps333/project/zone_out/fps333/mod.ff" "$stage/runtime/mods/pml220/mod.ff" || fail 'FPS asset missing'
@@ -276,7 +278,7 @@ DOCKERFILE
     docker build --pull=false --network none --iidfile "$stage/image-id" "$stage" || fail 'Local image build failed'
     artifact=$(cat "$stage/image-id") || fail 'Image builder did not record an identity'
     docker run --rm --pull never --network none --read-only --entrypoint /bin/sh "$artifact" \
-        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/mods/pml220/canonical-shared.cfg; test -s /opt/cod4-artifact/mods/pml220/canonical-mode.cfg; test -s /opt/cod4-artifact/configuration/mode.cfg; test -s /opt/cod4-artifact/fps333.json; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
+        -ec 'test -x /opt/cod4-artifact/cod4x18_dedrun; test -s /opt/cod4-artifact/mods/pml220/mod.ff; test -s /opt/cod4-artifact/mods/pml220/promod/servercheck.gsx; test -s /opt/cod4-artifact/mods/pml220/canonical-shared.cfg; test -s /opt/cod4-artifact/mods/pml220/canonical-mode.cfg; test -s /opt/cod4-artifact/configuration/mode.cfg; test -s /opt/cod4-artifact/fps333.json; test -s /opt/cod4-artifact/inputs.json; test -s /opt/cod4-artifact/integrity/addiwdheaders/jcod4x_00.dat; libraries=$(ldd /opt/cod4-artifact/cod4x18_dedrun); case "$libraries" in *"not found"*) exit 1;; esac' || fail 'Packaged runtime validation failed'
 }
 write_artifact_record() {
     printf '%s %s %s %s %s %s %s\n' "$1" "$revision" "$asset_ref" "$bot_revision" "$config_revision" "$mode_id" "$config_hash"

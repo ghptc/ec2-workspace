@@ -106,6 +106,29 @@ bash tests/operations.sh
 git diff --check
 ```
 
+Promod preparation enables the existing `--allow-no-punkbuster` option. The
+private runtime contains `mods/pml220/promod/servercheck.gsx`, and its manifest
+records `punkbuster_warning_policy_overlay: true`. Packaging appends
+`set promod_allow_no_punkbuster "1"` to `canonical-mode.cfg` only for an enabled
+Promod overlay. The source catalog CFGs and their provenance hashes remain
+unchanged; this generated runtime setting executes before map initialization.
+Private startup CFGs retain precedence and may set the policy to `0`.
+
+To restore the original PB warning through authenticated RCON, send
+`set promod_allow_no_punkbuster 0`; use `1` to suppress it again. This controls
+only Promod's warning predicate. It does not supply, enable or disable native
+PunkBuster authentication. `sv_pure=1`, all eight administrative IWD integrity
+headers, and other Promod checks remain required. No `sv_punkbuster=1` workaround
+or engine modification is involved.
+
+Local verification generated the real overlay from hash-verified private inputs,
+confirmed that removing its single added predicate reproduces the original
+servercheck script exactly, and verified the overlay, enabled CFG and eight
+headers in a local Docker image archive. Existing runtime assets were retained.
+The regression suite checks the generator flag, missing-overlay rejection,
+packaging, pre-map CFG ordering and private zero override. Graphical HUD on/off
+validation remains pending; these checks do not deploy or authorize deployment.
+
 Adoption prerequisite: at review time canonical configuration master was
 `fe772fd08a05c66d1150882aefdcadedf66ea2db` (PR #1), which still has the old layout.
 Engine master resolves to `8bc5f3ed2c750b199bb084de350ef1cf2687eb9d`.
