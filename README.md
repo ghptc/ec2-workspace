@@ -108,9 +108,17 @@ git diff --check
 
 Adoption prerequisite: at review time canonical configuration master was
 `fe772fd08a05c66d1150882aefdcadedf66ea2db` (PR #1), which still has the old layout.
-Configuration PR #2 must be merged before a new homolog build can resolve the
+Engine master resolves to `8bc5f3ed2c750b199bb084de350ef1cf2687eb9d`.
+The proposed catalog at configuration PR #2 commit
+`b7b29be6f0d2930a1237de37954f5f591fa3f712` passes local consumer validation
+(Promod, 12 slots, Crash/Strike/Crossfire/Backlot). Configuration PR #2 must be
+merged before a new homolog build can resolve the
 modular catalog from master. This consumer fails closed while it is absent;
 it never substitutes a local feature branch or the historical monolithic CFG.
+The existing builder compiles in a disposable checkout and has no separately
+verified reusable engine artifact. Compilation therefore remains local on each
+homolog preparation; this integration adds no cache or service. Production
+continues to promote the exact approved image without compilation.
 
 After startup and UDP 28962 checks, homolog requests interactive approval and
 records the exact image ID/references in private `.state/approved`. Production

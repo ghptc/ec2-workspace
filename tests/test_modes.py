@@ -117,6 +117,47 @@ class CatalogTests(unittest.TestCase):
 
 class PackagingTests(unittest.TestCase):
     setUp = CatalogTests.setUp
+
+    def test_selected_package_preserves_assets_and_binds_provenance(self):
+        other = self.root / 'modes/other'
+        other.mkdir()
+        (other/'mode.cfg').write_text('set fs_game "mods/other"\n')
+        (other/'server.cfg').write_bytes(self.server.read_bytes())
+        output = self.root / 'runtime'
+        headers = output/'integrity/addiwdheaders'
+        headers.mkdir(parents=True)
+        names = {'jcod4x_00.dat'} | {f'localized_english_iw{i:02}.dat' for i in range(7)}
+        for name in names:
+            (headers/name).write_bytes(b'qualified-header')
+        mod = output/'mods/pml220'
+        mod.mkdir(parents=True)
+        (mod/'mod.ff').write_bytes(b'qualified-333-fastfile')
+        (mod/'bots.iwd').write_bytes(b'qualified-bot-warfare')
+        fps = {'mod_ff_sha256': modes.digest(mod/'mod.ff')}
+        (output/'fps333.json').write_text(json.dumps(fps))
+        record = {'maps': ['mp_crash', 'mp_strike'],
+                  'headers': {name: modes.digest(headers/name) for name in names},
+                  'binary_sha256': 'retained-binary-identity'}
+        (output/'inputs.json').write_text(json.dumps(record))
+        revisions = ('a'*40, 'b'*40, 'c'*40)
+        modes.package(self.root, 'promod', output, *revisions)
+        result = json.loads((output/'inputs.json').read_text())
+        self.assertEqual([result[k] for k in ('engine_revision', 'config_revision', 'bot_revision')],
+                         list(revisions))
+        self.assertEqual(result['headers'], record['headers'])
+        self.assertEqual(result['binary_sha256'], record['binary_sha256'])
+        self.assertEqual(result['fps333'], fps)
+        self.assertEqual(result['config_hash'], modes.select(self.root, 'promod')[2])
+        self.assertEqual(set(result['config_files']),
+                         {'shared/server.cfg', 'modes/promod/mode.cfg', 'modes/promod/server.cfg'})
+        self.assertEqual((mod/'canonical-shared.cfg').read_bytes(),
+                         (self.root/'shared/server.cfg').read_bytes())
+        self.assertEqual((mod/'canonical-mode.cfg').read_bytes(), self.server.read_bytes())
+        self.assertEqual((output/'configuration/mode.cfg').read_bytes(), self.metadata.read_bytes())
+        self.assertFalse((output/'mods/other').exists())
+        self.assertEqual((mod/'bots.iwd').read_bytes(), b'qualified-bot-warfare')
+        self.assertEqual(modes.digest(mod/'mod.ff'), fps['mod_ff_sha256'])
+
     def test_missing_or_corrupt_headers(self):
         runtime_root = self.root / 'runtime'
         runtime_root.mkdir()
