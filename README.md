@@ -1,5 +1,8 @@
 # CoD4 remote operations
 
+See [master deployment and Zombies readiness](docs/zombies-readiness.md) for
+required GitHub checks, local evidence and real-client qualification blockers.
+
 ```bash
 ./scripts/deploy-homolog.sh promod
 ./scripts/deploy-production.sh promod
