@@ -31,7 +31,10 @@ class DiagnosticsTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertNotIn('SENTINEL', rendered)
         self.assertNotIn('99.9', rendered)
-        self.assertNotIn('777', rendered)
+        # Observer clock digits can coincidentally contain the canary number.
+        # Inspect retained payload fields separately from generated timestamps.
+        payload = [{k:v for k,v in json.loads(line).items() if k not in ('observed_utc','observer_monotonic_ns')} for line in rendered.splitlines()]
+        self.assertNotIn('777', json.dumps(payload))
         entries = [json.loads(line) for line in rendered.splitlines()]
         self.assertEqual(entries[0]['dump_ring_slot'], '17')
         self.assertEqual(entries[0]['source_utc'], '2026-10-26T22:00:01.123456789Z')

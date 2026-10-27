@@ -134,7 +134,7 @@ confirm() {
     read -r -p "$1 Type yes: " answer
     [[ "$answer" == yes ]] || fail 'Confirmation declined'
 }
-deploy_image() {
+deploy_image_locked() {
     need docker
     need python3
     local metadata identity image_revision platform host_platform previous candidate previous_mode startup_contract
@@ -149,7 +149,7 @@ deploy_image() {
     mapfile -t startup_values <<< "$startup_contract"
     mode_fs_game=${startup_values[0]}; startup_map=${startup_values[1]}; mode_maps=${startup_values[2]}; mode_maxclients=${startup_values[3]}
     platform=$(python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; print(c["Os"]+"/"+c["Architecture"])' <<< "$metadata")
-    host_platform=$(remote docker version --format '{{.Server.Os}}/{{.Server.Arch}}')
+    host_platform=$(remote docker version --format '{{.Server.Os}}/{{.Server.Arch}}') || fail 'Cannot verify the host platform'
     [[ "$platform" == "$host_platform" ]] || fail "Image platform $platform differs from host $host_platform"
     if [[ "$environment" == production ]]; then
         [[ "$(remote docker inspect --format '{{.Image}} {{.State.Running}}' cod4-homolog)" == "$identity true" ]] || fail 'Approved image is no longer running in homolog'
@@ -165,14 +165,17 @@ deploy_image() {
         verify_homolog "$identity" || return 1
     fi
     # Keep rollback evidence even if this process or SSH is interrupted.
-    image_config "$previous" > "$ROOT/.state/rollback-$environment.json"
+    image_config "$previous" > "$ROOT/.state/rollback-$environment.json" || fail 'Cannot persist the exact rollback configuration'
     # pipefail prevents applying an incomplete image transfer.
     docker image save "$identity" | remote docker image load >/dev/null || fail 'Image transfer failed; runtime was not changed'
+    host_runtime_safe=0
     if apply_runtime <<< "$candidate" && check_health "$mode_fs_game" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$identity" ]]; then
+        host_runtime_safe=1
         printf 'Deployed %s revision %s to %s\n' "$identity" "$revision" "$environment"
     else
         printf 'Deployment failed for %s. Restoring previous image %s.\n' "$environment" "$previous" >&2
         if apply_runtime <<< "$(image_config "$previous")" && check_health "$previous_mode" && [[ "$(remote docker inspect --format '{{.Image}}' "$container")" == "$previous" ]]; then
+            host_runtime_safe=1
             printf 'Rollback healthy: %s\n' "$previous" >&2
         else
             printf 'ROLLBACK FAILED: inspect %s immediately.\n' "$container" >&2
@@ -181,10 +184,46 @@ deploy_image() {
     fi
     if [[ "$environment" == homolog ]]; then
         confirm 'Health checks passed. Approve this exact artifact for production?' || return 1
-        mkdir -p -- "$ROOT/.state"
-        write_artifact_record "$identity" > "$ROOT/.state/approved.next"
-        mv -- "$ROOT/.state/approved.next" "$ROOT/.state/approved"
+        mkdir -p -- "$ROOT/.state" || fail 'Cannot create approval directory'
+        write_artifact_record "$identity" > "$ROOT/.state/approved.next" || fail 'Cannot write complete approval record'
+        mv -- "$ROOT/.state/approved.next" "$ROOT/.state/approved" || fail 'Cannot commit approval record'
     fi
+}
+
+# Production deployment and the host mode controller share this host lease.
+# Before bridge installation the absent file preserves the existing workflow.
+# Installation creates a root-owned 0644 lock in a root-owned parent directory.
+deploy_image() {
+    local lease_pid lease_read lease_write lease_state result=0
+    if [[ "$environment" == production ]]; then
+        coproc MODE_LEASE { remote bash -c '
+set -euo pipefail
+file=/opt/services/cod4/.production-transition.lock
+if [[ ! -e "$file" ]]; then printf "legacy\n"; read -r release; exit; fi
+[[ ! -L "$file" && "$(stat -c %u "$file")" == 0 && "$(stat -c %a "$file")" == 644 ]] || exit 1
+exec 9< "$file"
+flock -n 9 || exit 2
+marker=/opt/services/cod4/.production-deployment.json
+[[ ! -e "$marker" && ! -L "$marker" ]] || exit 2
+umask 077
+(set -o noclobber; printf "{\"phase\":\"deployment-in-progress-or-interrupted\"}\n" > "$marker")
+printf "locked\n"
+if read -r release && [[ "$release" == release ]]; then rm -- "$marker"; fi
+' mode-deployment-lease; }
+        lease_pid=$MODE_LEASE_PID
+        lease_read=${MODE_LEASE[0]}; lease_write=${MODE_LEASE[1]}
+        IFS= read -r -t 15 lease_state <&"$lease_read" || fail 'Host production transition lock unavailable'
+        if [[ "$lease_state" == locked || "$lease_state" == legacy ]]; then
+            host_runtime_safe=1
+        else fail 'Invalid production transition lock response'; fi
+    fi
+    deploy_image_locked "$@" || result=$?
+    if [[ "$environment" == production ]]; then
+        if [[ $host_runtime_safe == 1 ]]; then printf "release\n" >&"$lease_write" || true
+        else printf "hold\n" >&"$lease_write" || true; fi
+        wait "$lease_pid" || true
+    fi
+    return "$result"
 }
 
 CONFIG_REPOSITORY=https://github.com/ghptc/cod4-config-server.git
@@ -210,6 +249,8 @@ resolve_master() {
     select_mode
     local dependency_lock=bots/dependencies.json
     if [[ "$mode_fs_game" == mods/btd_alpha_001 ]]; then dependency_lock=tools/btd/dependencies.json; fi
+    bridge_protocol=disabled
+    if [[ -f "$stage/engine/src/sv_mode_bridge.c" ]]; then bridge_protocol=C4M1; fi
     asset_ref=$(sha256sum "$stage/engine/$dependency_lock") || fail 'Dependency lock missing'
     asset_ref=${asset_ref%% *}
     bot_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bot_warfare"]["commit"])' "$stage/engine/bots/dependencies.json") || fail 'Cannot read Bot Warfare revision'
@@ -302,7 +343,7 @@ RUN chmod -R a+rX /opt/cod4-artifact && ln -s /home/user/cod4/main /opt/cod4-art
 USER 1000:1000
 WORKDIR /opt/cod4-artifact
 ENTRYPOINT ["/opt/cod4-artifact/cod4x18_dedrun"]
-LABEL org.opencontainers.image.source="$ENGINE_REPOSITORY" org.opencontainers.image.revision="$revision" io.cod4.assets.lock="$asset_ref" io.cod4.bot-warfare.revision="$bot_revision" io.cod4.config.revision="$config_revision" io.cod4.mode="$mode_id" io.cod4.config.hash="$config_hash" io.cod4.fs-game="$mode_fs_game" io.cod4.startup-map="$startup_map" io.cod4.maps="$mode_maps" io.cod4.maxclients="$mode_maxclients"
+LABEL io.cod4.rcon-mode-bridge="$bridge_protocol" org.opencontainers.image.source="$ENGINE_REPOSITORY" org.opencontainers.image.revision="$revision" io.cod4.assets.lock="$asset_ref" io.cod4.bot-warfare.revision="$bot_revision" io.cod4.config.revision="$config_revision" io.cod4.mode="$mode_id" io.cod4.config.hash="$config_hash" io.cod4.fs-game="$mode_fs_game" io.cod4.startup-map="$startup_map" io.cod4.maps="$mode_maps" io.cod4.maxclients="$mode_maxclients"
 DOCKERFILE
     # Keep source and Git metadata out of the Docker context and runtime image.
     printf 'engine\nconfig\nbots\nfps333\n' > "$stage/.dockerignore"
