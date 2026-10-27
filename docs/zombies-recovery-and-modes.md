@@ -37,6 +37,18 @@ modify/rebuild the original fastfile, decompile bytecode, change VM semantics,
 or change Promod. Original or derived third-party scripts and full logs must
 not be committed. The workspace rejects missing/tampered overlays at packaging.
 
+Killhouse navigation preparation adds a third private overlay, `svr/pezbot.gsx`,
+and declares `navigation_source_sha256` as
+`ebe235fd9a6f5879c1aacb7b79e1ff87fb99d617ca8dd347737e5e88abc91f09`.
+Packaging requires that exact source identity and the exact three-overlay set;
+each output remains hash-checked and symlinks are rejected. The companion
+engine preparation makes only the map-specific terminal sentinel correction
+(`end ` to `end`), preserving coordinates and the navigation graph. Legacy two-overlay
+manifests remain accepted only without the navigation field/overlay and without
+Killhouse in the requested rotation. This contract update does not add Killhouse
+to any rotation or claim navigation/gameplay qualification. Require the companion
+engine preparation, native regression evidence and independent review first.
+
 ## Qualification and promotion gates
 
 1. Reproduce the original and secondary failures in disposable loopback runtimes.
