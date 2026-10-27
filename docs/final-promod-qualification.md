@@ -40,3 +40,7 @@ focused PRs together to the previous reviewed artifact, with no data migration.
 This is the final approved feature. Return all three repositories to feature
 freeze after focused delivery; operational qualification does not authorize
 additional features, framework changes, CI/deployment redesign or bridge use.
+
+Current development status: feature freeze, with only focused qualification and
+remediation of this final candidate permitted. This does not authorize merges,
+service changes, bridge activation or deployment.
