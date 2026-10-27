@@ -142,6 +142,7 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             'spawn_points_source_sha256': 'b351917eb399ffbd3e4a93551d0bb8e62954414ea6b1659ff3b4d83becdc7408',
             'allied_survival_source_sha256': '197c86b48d3c11cf7ab2cda46b7d692dce071c1cebc2b73fa4f02830dda6eb11',
             'allied_zombie_source_sha256': '0e1713b629a8e9b79fae09161a18193eb3e5cdcc63c301a6650ddb519ceb39c8',
+            'allied_ammo_source_sha256': '545021b1444b643d270db77fad21767368b94c439a560dd739ed6de6d321b7ad',
         }
         if 'allied_bots' in record:
             if record['allied_bots'] is not True or 'navigation_source_sha256' not in record:
@@ -150,8 +151,8 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
                 raise ValueError('Unsupported BTD allied source identity')
             overlay_names.update({'btd_allies.gsx',
                                   'btd_gametypes/survival/_survival_logic.gsx',
-                                  'k3/_zombie.gsx'})
-        elif any(name in record for name in ('allied_survival_source_sha256', 'allied_zombie_source_sha256')):
+                                  'k3/_zombie.gsx', 'btd_general/_ammo_drops.gsx'})
+        elif any(name in record for name in ('allied_survival_source_sha256', 'allied_zombie_source_sha256', 'allied_ammo_source_sha256')):
             raise ValueError('Undeclared BTD allied source identities')
         # Extra source files can override fastfile scripts even when omitted from
         # the manifest. Do not package undeclared code or follow private links.

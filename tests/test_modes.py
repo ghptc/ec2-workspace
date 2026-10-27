@@ -129,6 +129,8 @@ class PackagingTests(unittest.TestCase):
         allied_cases = {'valid_allied', 'allied_missing_declaration', 'allied_undeclared_files', 'allied_false_declaration',
                         'allied_string_declaration', 'allied_missing_navigation',
                         'allied_missing_survival_hash', 'allied_bad_zombie_hash',
+                        'allied_missing_ammo_hash', 'allied_bad_ammo_hash', 'allied_undeclared_ammo_hash',
+                        'allied_missing_ammo', 'allied_tampered_ammo', 'allied_missing_ammo_manifest',
                         'allied_bad_death_hash', 'allied_bad_spawn_hash',
                         'allied_missing_adapter', 'allied_missing_survival', 'allied_missing_zombie',
                         'allied_tampered_adapter', 'allied_tampered_survival', 'allied_tampered_zombie',
@@ -192,7 +194,8 @@ class PackagingTests(unittest.TestCase):
                 if case in allied_cases:
                     allied_paths = {'adapter': 'btd_allies.gsx',
                                     'survival': 'btd_gametypes/survival/_survival_logic.gsx',
-                                    'zombie': 'k3/_zombie.gsx'}
+                                    'zombie': 'k3/_zombie.gsx',
+                                    'ammo': 'btd_general/_ammo_drops.gsx'}
                     for name in allied_paths.values():
                         path = mod / name
                         path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,10 +205,11 @@ class PackagingTests(unittest.TestCase):
                         death_callback_source_sha256='b6ca82d2d1f8dcd0c454d5e193f54ce1c1147619d547cba4472bbe00bfa60861',
                         spawn_points_source_sha256='b351917eb399ffbd3e4a93551d0bb8e62954414ea6b1659ff3b4d83becdc7408',
                         allied_survival_source_sha256='197c86b48d3c11cf7ab2cda46b7d692dce071c1cebc2b73fa4f02830dda6eb11',
-                        allied_zombie_source_sha256='0e1713b629a8e9b79fae09161a18193eb3e5cdcc63c301a6650ddb519ceb39c8')
+                        allied_zombie_source_sha256='0e1713b629a8e9b79fae09161a18193eb3e5cdcc63c301a6650ddb519ceb39c8',
+                        allied_ammo_source_sha256='545021b1444b643d270db77fad21767368b94c439a560dd739ed6de6d321b7ad')
                     if case == 'allied_missing_declaration': record.pop('allied_bots')
                     if case == 'allied_undeclared_files':
-                        for field in ('allied_bots', 'allied_survival_source_sha256', 'allied_zombie_source_sha256'):
+                        for field in ('allied_bots', 'allied_survival_source_sha256', 'allied_zombie_source_sha256', 'allied_ammo_source_sha256'):
                             record.pop(field)
                         for name in allied_paths.values(): record['overlays'].pop(name)
                     if case == 'allied_false_declaration': record['allied_bots'] = False
@@ -215,10 +219,19 @@ class PackagingTests(unittest.TestCase):
                         record['overlays'].pop('svr/pezbot.gsx')
                         navigation.unlink()
                     if case == 'allied_missing_survival_hash': record.pop('allied_survival_source_sha256')
-                    for short in ('zombie', 'death', 'spawn'):
+                    if case == 'allied_missing_ammo_hash': record.pop('allied_ammo_source_sha256')
+                    if case == 'allied_undeclared_ammo_hash':
+                        for field in ('allied_bots', 'allied_survival_source_sha256', 'allied_zombie_source_sha256'):
+                            record.pop(field)
+                        for name in allied_paths.values():
+                            (mod / name).unlink()
+                            record['overlays'].pop(name)
+                    if case == 'allied_missing_ammo_manifest': record['overlays'].pop(allied_paths['ammo'])
+                    for short in ('zombie', 'death', 'spawn', 'ammo'):
+
                         if case == 'allied_bad_' + short + '_hash':
                             field = {'zombie': 'allied_zombie_source_sha256', 'death': 'death_callback_source_sha256',
-                                     'spawn': 'spawn_points_source_sha256'}[short]
+                                     'spawn': 'spawn_points_source_sha256', 'ammo': 'allied_ammo_source_sha256'}[short]
                             record[field] = '0' * 64
                     for short, name in allied_paths.items():
                         path = mod / name
