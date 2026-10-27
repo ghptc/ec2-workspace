@@ -57,27 +57,32 @@ def atomic(path, value):
     finally: os.close(fd)
 
 
-def run(argv, payload=None):
+def run(argv, payload=None, audit=None):
     # Child output can contain private configuration; never echo it on errors.
     result = subprocess.run(argv, input=payload, text=True, capture_output=True, timeout=300)
+    if audit is not None:
+        atomic(audit, {'exit_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
     if result.returncode:
-        raise RuntimeError(f'{argv[0]} failed with exit {result.returncode}')
+        suffix = f'; private diagnostics: {audit}' if audit is not None else ''
+        raise RuntimeError(f'{argv[0]} failed with exit {result.returncode}{suffix}')
     return result.stdout
 
 
-def primitive(operation, payload=None):
+def primitive(operation, payload=None, audit=None):
     scripts = {
         'snapshot': 'select_environment production; snapshot_runtime; printf "%s\\n" "$config"',
         'apply': 'select_environment production; project=cod4-production; service=cod4; work=/opt/services/cod4; apply_runtime',
     }
     return run(['bash', '-c', 'set -euo pipefail; source "$1/common.sh"; '
-                'remote() { "$@"; }; ' + scripts[operation], 'mode-controller', str(SCRIPTS)], payload)
+                'remote() { "$@"; }; ' + scripts[operation], 'mode-controller', str(SCRIPTS)], payload, audit)
 
 
 class Controller:
     def __init__(self, state=STATE):
         self.state = state
         self.current = None
+        self.audit_sequence = 0
+        self.operation = None
 
     def inspect(self):
         return json.loads(run(['docker', 'inspect', 'cod4-production']))[0]
@@ -132,7 +137,9 @@ class Controller:
             stream.flush(); os.fsync(stream.fileno())
 
     def apply(self, config):
-        primitive('apply', json.dumps(config))
+        self.audit_sequence += 1
+        audit = self.state / f'{self.operation}-apply-{self.audit_sequence}.json'
+        primitive('apply', json.dumps(config), audit)
 
     def query(self, host):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -148,7 +155,9 @@ class Controller:
         # A root-owned verifier runs on a separate machine and queries UDP from
         # there. Host hairpin/public-IP queries do not count as external proof.
         trusted(EXTERNAL_VERIFIER)
-        data = json.loads(run([str(EXTERNAL_VERIFIER), operation]))
+        self.audit_sequence += 1
+        audit = self.state / f'{operation}-external-{self.audit_sequence}.json'
+        data = json.loads(run([str(EXTERNAL_VERIFIER), operation], audit=audit))
         if data.get('external') is not True or data.get('operation') != operation:
             raise ValueError('External verifier attestation mismatch')
         return data
@@ -164,7 +173,8 @@ class Controller:
                 raise ValueError('Docker startup configuration mismatch')
         before = self.current
         if before is not None:
-            if observed['Mounts'] != before['Mounts'] or observed['Config'].get('Env') != before['Config'].get('Env'):
+            mounts = lambda c: sorted(c['Mounts'], key=lambda m: m['Destination'])
+            if mounts(observed) != mounts(before) or observed['Config'].get('Env') != before['Config'].get('Env'):
                 raise ValueError('Private mounts/environment changed')
             if set(observed['NetworkSettings']['Networks']) != set(before['NetworkSettings']['Networks']):
                 raise ValueError('Container networks changed')
@@ -238,6 +248,7 @@ class Controller:
         # journal and stdout. It is never reconstructed from mode defaults.
         atomic(self.state / (tx['operation'] + '-previous.json'), baseline)
         atomic(self.state / (tx['operation'] + '-target.json'), target)
+        self.operation = tx['operation']
         self.backup_private(baseline, tx['operation'])
         self.phase(tx, 'pending')
         try:

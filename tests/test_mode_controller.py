@@ -154,6 +154,10 @@ class DockerVerification(unittest.TestCase):
         with patch.object(c,'inspect',return_value=observed), patch.object(c,'query',return_value=self.status), patch.object(c,'external',return_value=self.status):
             c.verify(self.config,'promod',{},'fixture')
     def test_exact_image_and_private_runtime_pass(self): self.verify(copy.deepcopy(self.original))
+    def test_mount_inspection_order_is_not_runtime_drift(self):
+        self.original['Mounts'].append({'Source':'/private/main','Destination':'/home/user/cod4/main','RW':False})
+        observed=copy.deepcopy(self.original);observed['Mounts'].reverse()
+        self.verify(observed)
     def test_wrong_image_environment_mounts_networks_ports_rejected(self):
         variants=[]
         for path,value in [(('Image',),NEW),(('State','Running'),False),

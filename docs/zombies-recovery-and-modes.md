@@ -95,7 +95,7 @@ qualified and healthy, snapshots exact prior/target Compose JSON, and archives
 private production home bytes under restrictive permissions. It preserves all
 mounts, private environment, network and ports; verifies a read-only rootfs; and
 uses a nonblocking host-local transaction lock. A journal records operation ID,
-operator UID, phase timestamps, images and failures. Private values stay out of
+operator UID, phase timestamps, images and failures. Private apply/probe diagnostics are saved alongside the snapshots. Private values stay out of
 stdout/journal; private snapshots remain root-readable only.
 
 After recreation, Docker image/startup/private configuration checks, local UDP
