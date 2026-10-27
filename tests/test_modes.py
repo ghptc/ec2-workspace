@@ -120,8 +120,19 @@ class PackagingTests(unittest.TestCase):
 
     def test_btd_packaging_and_rejection(self):
         self.metadata.write_text('set fs_game "mods/btd_alpha_001"\n')
-        for case in ('valid', 'tampered', 'path', 'missing', 'wrong_recipe', 'missing_overlay', 'tampered_overlay'):
+        original_server = self.server.read_text()
+        navigation_cases = {'valid_navigation', 'navigation_killhouse', 'missing_navigation_field',
+                            'missing_navigation_overlay', 'missing_navigation_file',
+                            'tampered_navigation', 'bad_navigation_hash', 'null_navigation_hash',
+                            'symlink_navigation', 'symlink_navigation_parent', 'navigation_extra_overlay',
+                            'undeclared_navigation'}
+        cases = ('valid', 'tampered', 'path', 'missing', 'wrong_recipe', 'missing_overlay',
+                 'tampered_overlay', 'extra_overlay', 'legacy_killhouse', *sorted(navigation_cases))
+        for case in cases:
             with self.subTest(case=case):
+                self.server.write_text(original_server)
+                if case in ('legacy_killhouse', 'navigation_killhouse'):
+                    self.server.write_text(original_server.replace('map mp_strike', 'map mp_killhouse'))
                 output = self.root / case
                 headers = output / 'integrity/addiwdheaders'
                 headers.mkdir(parents=True)
@@ -140,7 +151,7 @@ class PackagingTests(unittest.TestCase):
                 spawn.parent.mkdir(parents=True)
                 spawn.write_bytes(b'initialized angles fixture')
                 (output / 'cod4x18_dedrun').write_bytes(b'engine')
-                record = {'maps': ['mp_crash', 'mp_strike'], 'asset_type': 'btd-alpha-001',
+                record = {'maps': ['mp_crash', 'mp_strike', 'mp_killhouse'], 'asset_type': 'btd-alpha-001',
                           'fs_game': 'mods/btd_alpha_001',
                           'binary_sha256': modes.digest(output / 'cod4x18_dedrun'),
                           'headers': {n: modes.digest(headers / n) for n in names},
@@ -148,6 +159,32 @@ class PackagingTests(unittest.TestCase):
                           'default_cfgs': ['btd_settings.cfg'],
                           'overlays': {'maps/mp/gametypes/_globallogic.gsx': modes.digest(overlay),
                                        'btd_gametypes/survival/_survival_spawns.gsx': modes.digest(spawn)}}
+                if case in navigation_cases:
+                    navigation = mod / 'svr/pezbot.gsx'
+                    navigation.parent.mkdir()
+                    navigation.write_bytes(b'map-specific terminal sentinel fixture')
+                    record['navigation_source_sha256'] = 'ebe235fd9a6f5879c1aacb7b79e1ff87fb99d617ca8dd347737e5e88abc91f09'
+                    record['overlays']['svr/pezbot.gsx'] = modes.digest(navigation)
+                    if case in ('missing_navigation_field', 'undeclared_navigation'):
+                        record.pop('navigation_source_sha256')
+                    if case == 'undeclared_navigation': record['overlays'].pop('svr/pezbot.gsx')
+                    if case == 'missing_navigation_overlay': record['overlays'].pop('svr/pezbot.gsx')
+                    if case == 'missing_navigation_file': navigation.unlink()
+                    if case == 'tampered_navigation': navigation.write_bytes(b'changed')
+                    if case == 'bad_navigation_hash': record['navigation_source_sha256'] = '0' * 64
+                    if case == 'null_navigation_hash': record['navigation_source_sha256'] = None
+                    if case == 'symlink_navigation':
+                        target = output / 'external-navigation'
+                        navigation.rename(target)
+                        navigation.symlink_to(target)
+                    if case == 'symlink_navigation_parent':
+                        target = output / 'external-svr'
+                        navigation.parent.rename(target)
+                        navigation.parent.symlink_to(target, target_is_directory=True)
+                if case in ('extra_overlay', 'navigation_extra_overlay'):
+                    extra = mod / 'extra.gsx'
+                    extra.write_bytes(b'unreviewed fixture')
+                    record['overlays']['extra.gsx'] = modes.digest(extra)
                 if case == 'tampered': (mod / 'mod.ff').write_bytes(b'changed')
                 if case == 'path': record['default_cfgs'] = ['../server.cfg']
                 if case == 'missing': record['assets'].pop('btd_weapons.iwd')
@@ -155,7 +192,7 @@ class PackagingTests(unittest.TestCase):
                 if case == 'missing_overlay': overlay.unlink()
                 if case == 'tampered_overlay': overlay.write_bytes(b'changed')
                 (output / 'inputs.json').write_text(json.dumps(record))
-                if case != 'valid':
+                if case not in ('valid', 'valid_navigation', 'navigation_killhouse'):
                     with self.assertRaises(ValueError):
                         modes.package(self.root, 'promod', output, 'engine', 'config', 'none')
                     self.assertFalse((output / 'configuration').exists())

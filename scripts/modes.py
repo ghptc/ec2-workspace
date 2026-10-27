@@ -127,9 +127,19 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
                 raise ValueError(f'BTD asset identity mismatch: {name}')
         overlay_names = {'maps/mp/gametypes/_globallogic.gsx',
                          'btd_gametypes/survival/_survival_spawns.gsx'}
+        if 'navigation_source_sha256' in record:
+            # The navigation overlay is generated from this pinned private BTD
+            # source. Never accept an arbitrary source or additional overlay.
+            if record['navigation_source_sha256'] != 'ebe235fd9a6f5879c1aacb7b79e1ff87fb99d617ca8dd347737e5e88abc91f09':
+                raise ValueError('Unsupported BTD navigation source identity')
+            overlay_names.add('svr/pezbot.gsx')
+        elif 'mp_killhouse' in maps.split(','):
+            raise ValueError('Killhouse requires verified BTD navigation preparation')
+        elif (destination / 'svr/pezbot.gsx').exists() or (destination / 'svr/pezbot.gsx').is_symlink():
+            raise ValueError('Undeclared BTD navigation overlay')
         overlays = record.get('overlays', {})
         if set(overlays) != overlay_names:
-            raise ValueError('Verified BTD death and spawn overlays required')
+            raise ValueError('Verified BTD death, spawn and declared navigation overlays required')
         for name, expected in overlays.items():
             overlay = destination / name
             if overlay.is_symlink() or not overlay.is_file() or any(
