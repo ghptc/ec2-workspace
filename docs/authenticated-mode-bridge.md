@@ -175,6 +175,29 @@ reviewed code revert plus an authorized bridge stop/socket-mount removal; retain
 host CLI recovery and authentication repairs. Runtime rollback needs the exact
 previous approved artifact and operator authorization.
 
+## Private snapshot security boundary
+
+The home directory is writable by the game process. Host-root backup must not
+use `tar.add` on that live tree: `dereference=False` does not prevent a file or
+directory being replaced with a host-path symlink between stat and open. On
+rollback that could disclose copied host bytes through a restored regular file.
+
+Snapshots now walk relative to open directory descriptors, open every directory
+and regular file with `O_NOFOLLOW`, compare descriptor identity to the observed
+entry, and copy only from the checked file descriptor. FIFO replacement uses
+nonblocking open and fails type validation. Existing symlinks are stored as link
+text; no traversal follows their targets. Regular hardlinks are copied as separate
+regular members, preserving their bytes and metadata without resolving an
+untrusted link target. This snapshot is not an atomic point-in-time filesystem
+snapshot: ordinary concurrent writes can still produce a pre-copy file prefix;
+truncation or replacement before open fails closed before the target is applied.
+
+Synthetic regression fixtures cover regular-file and directory replacement with
+outside symlinks, FIFO replacement, replacement after descriptor open, and normal
+private-byte/metadata/symlink restoration. They never read real host secrets or
+exercise production. This repair requires reviewed deployment separately; it
+does not enable the bridge or authorize any infrastructure mutation.
+
 ## Reproducible local checks and limits
 
 ```sh
