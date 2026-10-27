@@ -5,7 +5,10 @@ activation is authorized by preparing this change. Preserve Promod and Zombies.
 
 The catalog owns military `botnames.txt`; packaging validates safe unique ASCII
 names, fingerprints it and copies it to root `scriptdata/botnames.txt`, matching
-the existing Bot Warfare convention. Engine creation assigns names; packaging
+the existing Bot Warfare convention. The engine reads persistent home first and
+artifact basepath second, as that convention already does. Qualification must
+record the effective pool and identify any stale private-home pool before any
+operator-approved deployment; packaging never edits persistent environments. Engine creation assigns names; packaging
 never renames players. Objective activation requires the engine manifest's S&D
 flag and matching hashes for both the derived AI and native defuse-reference
 overlay. Native ownership, interaction timers and outcome callbacks stay intact.
