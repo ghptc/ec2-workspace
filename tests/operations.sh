@@ -269,6 +269,7 @@ apply_count=0
 remote() {
     printf '%s\n' "$*" >> "$test_root/remote.log"
     case "$1 $2" in
+        'bash -c') [[ "$*" == *mode-deployment-lease* ]] || return 1; printf "legacy\n"; read -r release ;;
         'docker version') printf 'linux/amd64\n' ;;
         'docker inspect')
             if [[ "$*" == *'{{.Image}} {{.State.Running}}'* ]]; then printf '%s true\n' "${homolog_id:-$artifact_id}"
@@ -299,6 +300,10 @@ if grep -Eq 'docker image load|^apply |^confirm$' "$test_root/remote.log"; then 
 deploy_image "$artifact_id" >/dev/null
 read -r approved approved_revision approved_assets approved_bots approved_config approved_mode approved_hash < "$ROOT/.state/approved"
 [[ "$approved" == "$artifact_id" && "$approved_revision" == "$expected" && "$approved_assets" == "$asset_ref" && "$approved_bots" == "$bot_revision" && "$approved_config" == "$expected_config" && "$approved_mode" == promod && "$approved_hash" == "$config_hash" ]]
+cp "$ROOT/.state/approved" "$test_root/preserved-approval"
+if (apply_count=0; write_artifact_record() { printf partial; return 1; }; deploy_image "$artifact_id") > "$test_root/approval-failure" 2>&1; then exit 1; fi
+grep -q 'Cannot write complete approval record' "$test_root/approval-failure"
+cmp "$ROOT/.state/approved" "$test_root/preserved-approval"
 grep -q 'canonical-shared.cfg' "$test_root/applied"
 grep -q '/opt/cod4-artifact/cod4x18_dedrun' "$test_root/applied"
 grep -q '"source": "/persist"' "$test_root/applied"

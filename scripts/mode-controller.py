@@ -17,6 +17,7 @@ import sys
 import time
 import tarfile
 import uuid
+import shutil
 
 SCRIPTS = Path(__file__).resolve().parent
 MODES = {'promod': ('mods/pml220', 'sd'), 'zombies': ('mods/btd_alpha_001', 'war')}
@@ -24,13 +25,19 @@ REGISTRY = Path('/etc/cod4-modes/qualified.json')
 STATE = Path('/opt/services/cod4/.mode-controller')
 EXTERNAL_VERIFIER = Path('/etc/cod4-modes/external-verify')
 IMAGE_RE = __import__('re').compile(r'sha256:[0-9a-f]{64}')
+DEPLOY_LOCK = Path('/opt/services/cod4/.production-transition.lock')
+DEPLOY_GUARD = Path('/opt/services/cod4/.production-deployment.json')
+LOCK_FD = None
 runtime = None
 
 
 def load_runtime():
     global runtime
-    spec = importlib.util.spec_from_file_location('runtime', SCRIPTS / 'runtime.py')
-    runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+    import types
+    source = SCRIPTS / 'runtime.py'
+    runtime = types.ModuleType('runtime')
+    runtime.__file__ = str(source)
+    exec(compile(source.read_bytes(), str(source), 'exec'), runtime.__dict__)
 
 
 def trusted(path, directory=False):
@@ -59,7 +66,8 @@ def atomic(path, value):
 
 def run(argv, payload=None, audit=None):
     # Child output can contain private configuration; never echo it on errors.
-    result = subprocess.run(argv, input=payload, text=True, capture_output=True, timeout=300)
+    result = subprocess.run(argv, input=payload, text=True, capture_output=True, timeout=300,
+                            pass_fds=(() if LOCK_FD is None else (LOCK_FD,)))
     if audit is not None:
         atomic(audit, {'exit_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
     if result.returncode:
@@ -78,6 +86,12 @@ def primitive(operation, payload=None, audit=None):
 
 
 class Controller:
+    container = 'cod4-production'
+    project = 'cod4-production'
+    udp_port = 28960
+    private_home = Path('/opt/services/cod4/production/home')
+    readiness_timeout = 90
+
     def __init__(self, state=STATE):
         self.state = state
         self.current = None
@@ -85,18 +99,21 @@ class Controller:
         self.operation = None
 
     def inspect(self):
-        return json.loads(run(['docker', 'inspect', 'cod4-production']))[0]
+        return json.loads(run(['docker', 'inspect', self.container]))[0]
 
     def snapshot(self):
         config = json.loads(primitive('snapshot'))
-        if config.get('name') != 'cod4-production' or set(config['services']) != {'cod4'}:
+        return self.validate_snapshot(config)
+
+    def validate_snapshot(self, config):
+        if config.get('name') != self.project or set(config['services']) != {'cod4'}:
             raise ValueError('Unexpected production Compose project/services')
         service = config['services']['cod4']
-        if service.get('container_name') != 'cod4-production' or service.get('build'):
+        if service.get('container_name') != self.container or service.get('build'):
             raise ValueError('Expected pinned prebuilt production service')
         if service.get('read_only') is not True:
             raise ValueError('Production root filesystem must be read-only')
-        if not any(p.get('protocol') == 'udp' and str(p.get('published')) == '28960'
+        if not any(p.get('protocol') == 'udp' and str(p.get('published')) == str(self.udp_port)
                    and p.get('target') == 28960 for p in service.get('ports', [])):
             raise ValueError('Expected UDP 28960 mapping')
         return config
@@ -127,7 +144,12 @@ class Controller:
         if len(homes) != 1 or homes[0].get('type') != 'bind':
             raise ValueError('Expected one explicit persistent home bind mount')
         source = Path(homes[0]['source'])
-        if source != Path('/opt/services/cod4/production/home') or not source.is_dir():
+        trusted(source.parent, directory=True)
+        if source.is_symlink() or source.stat().st_dev != self.state.stat().st_dev:
+            raise ValueError('Private home must be a directory on the rollback filesystem')
+        if any(v.get('target') != runtime.PERSISTENT_HOME and v.get('type') != 'tmpfs' and v.get('read_only') is not True for v in volumes):
+            raise ValueError('Only the private home may be a writable persistent mount')
+        if source != self.private_home or not source.is_dir():
             raise ValueError('Unexpected private home source')
         archive = self.state / (operation + '-private.tar.gz')
         with archive.open('xb') as stream:
@@ -135,6 +157,7 @@ class Controller:
             with tarfile.open(fileobj=stream, mode='w:gz', dereference=False) as tar:
                 tar.add(source, arcname='production/home')
             stream.flush(); os.fsync(stream.fileno())
+        with tarfile.open(archive, 'r:gz') as tar: self.validate_members(tar.getmembers())
 
     def apply(self, config):
         self.audit_sequence += 1
@@ -144,8 +167,9 @@ class Controller:
     def query(self, host):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(4)
-            s.sendto(b'\xff' * 4 + b'getstatus\n', (host, 28960))
-            data, _ = s.recvfrom(65535)
+            s.connect((host, self.udp_port))
+            s.send(b'\xff' * 4 + b'getstatus\n')
+            data = s.recv(65535)
         if not data.startswith(b'\xff' * 4 + b'statusResponse\n'):
             raise ValueError('Invalid UDP status response')
         fields = data.split(b'\n')[1].split(b'\\')
@@ -181,7 +205,7 @@ class Controller:
             if observed['HostConfig'].get('PortBindings') != before['HostConfig'].get('PortBindings'):
                 raise ValueError('Published ports changed')
         # Poll readiness only; this never repeats recreation.
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + self.readiness_timeout
         while True:
             try:
                 local = self.query('127.0.0.1')
@@ -217,7 +241,7 @@ class Controller:
         atomic(self.state / (tx['operation'] + '.json'), tx)
         print(json.dumps({k: tx[k] for k in ('operation', 'phase', 'previous_mode', 'target_mode')}), flush=True)
 
-    def transition(self, mode, registry):
+    def transition(self, mode, registry, operation=None, on_ready=None):
         if mode not in MODES:
             raise ValueError('Only zombies and promod are allowed')
         active = self.state / 'active.json'
@@ -241,16 +265,23 @@ class Controller:
         target = json.loads(json.dumps(config))
         runtime.adapt(target['services']['cod4'], records[mode]['image'], mode,
                       labels['io.cod4.config.hash'], *contract)
-        tx = {'operation': uuid.uuid4().hex, 'previous_mode': previous, 'target_mode': mode,
+        operation = operation or uuid.uuid4().hex
+        if not __import__('re').fullmatch(r'[a-f0-9]{32}', operation):
+            raise ValueError('Invalid operation identifier')
+        tx = {'operation': operation, 'previous_mode': previous, 'target_mode': mode,
               'previous_image': self.current['Image'], 'target_image': records[mode]['image'],
               'operator_uid': os.getuid(), 'started_at': time.time()}
         # Exact private configuration stays in restrictive snapshots, outside the
         # journal and stdout. It is never reconstructed from mode defaults.
         atomic(self.state / (tx['operation'] + '-previous.json'), baseline)
         atomic(self.state / (tx['operation'] + '-target.json'), target)
+        atomic(self.state / (tx['operation'] + '-inspection.json'), self.current)
         self.operation = tx['operation']
         self.backup_private(baseline, tx['operation'])
         self.phase(tx, 'pending')
+        if on_ready is not None and on_ready(tx) is False:
+            self.phase(tx, 'denied', failure='PlayerNotificationUnavailable')
+            return
         try:
             self.apply(target)
             self.phase(tx, 'verifying')
@@ -260,6 +291,7 @@ class Controller:
             # Keep private subprocess output out of the journal.
             self.phase(tx, 'rolling_back', failure=type(error).__name__, failure_detail=str(error)[:200])
             try:
+                self.restore_private(baseline, tx['operation'])
                 self.apply(baseline)
                 self.verify(baseline, previous, registry, tx['operation'])
             except Exception as rollback:
@@ -267,6 +299,91 @@ class Controller:
                 raise RuntimeError('Transition and rollback failed; operator recovery required') from None
             self.phase(tx, 'rolled_back')
             raise RuntimeError('Transition failed; exact previous runtime restored') from None
+
+    def restore_private(self, config, operation):
+        """Stop only production before atomically restoring the archived home.
+
+        Keep the failed home privately for diagnosis. Never extract through links.
+        """
+        if run(['docker', 'ps', '-a', '--filter', 'name=^/' + self.container + '$', '--format', '{{.ID}}']).strip():
+            run(['docker', 'stop', '--time', '10', self.container])
+        self.restore_home(config, operation)
+
+    def restore_home(self, config, operation):
+        home = self.private_home
+        mounts = config['services']['cod4']['volumes']
+        if [v.get('source') for v in mounts if v.get('target') == runtime.PERSISTENT_HOME] != [str(home)]:
+            raise ValueError('Unexpected rollback private home')
+        self.extract_home(home, operation)
+
+    @staticmethod
+    def validate_members(members):
+        links = {m.name for m in members if m.issym() or m.islnk()}
+        by_name = {member.name: member for member in members}
+        if len(by_name) != len(members): raise ValueError('Duplicate private archive member')
+        for member in members:
+            name = Path(member.name)
+            if str(name) != member.name or name.is_absolute() or '..' in name.parts or name.parts[:2] != ('production', 'home'):
+                raise ValueError('Unsafe private archive member')
+            if any(str(parent) in links for parent in name.parents):
+                raise ValueError('Private archive traverses a link')
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise ValueError('Special private archive member')
+            if member.islnk():
+                link = Path(member.linkname)
+                if str(link) != member.linkname or link.is_absolute() or '..' in link.parts or link.parts[:2] != ('production', 'home') or str(link) in links or any(str(parent) in links for parent in link.parents):
+                    raise ValueError('Unsafe archive hard link')
+                if str(link) not in by_name or not by_name[str(link)].isfile():
+                    raise ValueError('Archive hard link lacks a regular target')
+
+    def extract_home(self, home, operation):
+        # Archive contents were produced locally before mutation. Validate again
+        # for crash recovery and reject special files or extraction through links.
+        stage = self.state / (operation + '-restore-' + uuid.uuid4().hex)
+        stage.mkdir(mode=0o700)
+        with tarfile.open(self.state / (operation + '-private.tar.gz'), 'r:gz') as tar:
+            members = tar.getmembers()
+            self.validate_members(members)
+            # All destinations and hardlinks are bounded; symlinks have no children.
+            tar.extractall(stage, members=members, **({'filter': 'fully_trusted'} if sys.version_info >= (3,12) else {}))
+        restored = stage / 'production/home'
+        if not restored.is_dir() or restored.is_symlink(): raise ValueError('Missing private archive root')
+        failed = self.state / (operation + '-failed-home-' + uuid.uuid4().hex)
+        if home.exists(): os.rename(home, failed)
+        os.rename(restored, home)
+        descriptor = os.open(home.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+        shutil.rmtree(stage)
+
+    def recover(self, registry):
+        """Resume only the previous image; revoking the target cannot force it live."""
+        active = self.state / 'active.json'
+        if not active.exists(): return
+        tx = None
+        try:
+            tx = json.loads(active.read_text())
+            if tx['phase'] in ('success', 'rolled_back', 'denied'): return
+            operation = tx['operation']
+            if not __import__('re').fullmatch(r'[a-f0-9]{32}', operation): raise ValueError('Invalid recovery operation')
+            record = rollback_qualification(registry, tx['previous_mode'])
+            baseline = json.loads((self.state / (operation + '-previous.json')).read_text())
+            if record['image'] != baseline['services']['cod4']['image'] or record['image'] != tx['previous_image']:
+                raise ValueError('Recovery image is not qualified')
+            self.image(record, tx['previous_mode'])
+            self.current = json.loads((self.state / (operation + '-inspection.json')).read_text())
+            self.operation = operation
+            self.phase(tx, 'rolling_back', failure='InterruptedWorker')
+            self.restore_private(baseline, operation)
+            self.apply(baseline)
+            self.verify(baseline, tx['previous_mode'], registry, operation)
+            self.phase(tx, 'rolled_back')
+        except Exception:
+            if not isinstance(tx, dict) or not __import__('re').fullmatch(r'[a-f0-9]{32}', str(tx.get('operation', ''))):
+                shutil.copyfile(active, self.state / ('corrupt-active-' + uuid.uuid4().hex + '.json'))
+                tx = {'operation':uuid.uuid4().hex, 'previous_mode':'unknown', 'target_mode':'unknown'}
+            self.phase(tx, 'recovery_required', rollback_failure='RecoveryFailed')
+            raise RuntimeError('Interrupted transition requires operator recovery') from None
 
 
 def qualification(registry):
@@ -291,6 +408,20 @@ def qualification(registry):
     return records
 
 
+def rollback_qualification(registry, mode):
+    # Restoring a previously approved image does not require the failed target
+    # or RCON activation to remain approved. Its own evidence must remain valid.
+    if mode not in MODES: raise ValueError('Unknown rollback mode')
+    record = registry['modes'][mode]
+    if record.get('qualified') is not True: raise ValueError('Rollback image not qualified')
+    for gate in ('independent_review', 'mandatory_ci', 'operator_approval', 'gameplay'):
+        evidence(record['evidence'][gate])
+        if record['evidence'][gate].get('image') != record['image']: raise ValueError('Rollback evidence image mismatch')
+    if record['evidence']['gameplay'].get('actual_client_session') is not True:
+        raise ValueError('Rollback image lacks actual-client qualification')
+    return record
+
+
 def evidence(record):
     path = trusted(Path(record['path']))
     if hashlib.sha256(path.read_bytes()).hexdigest() != record['sha256']:
@@ -299,7 +430,7 @@ def evidence(record):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=('switch', 'status'))
+    p.add_argument('command', choices=('switch', 'status', 'recover'))
     p.add_argument('mode', nargs='?', choices=tuple(MODES))
     args = p.parse_args()
     if os.geteuid() != 0:
@@ -310,12 +441,18 @@ def main():
         trusted(path)
     trusted(STATE, directory=True)
     load_runtime()
-    with (STATE / 'transition.lock').open('a') as lock:
+    global LOCK_FD
+    with trusted(DEPLOY_LOCK).open('r') as lock:
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError: p.exit(2, 'busy: another host transition is pending\n')
+        if DEPLOY_GUARD.exists() or DEPLOY_GUARD.is_symlink():
+            p.exit(2, 'busy: production deployment active or interrupted; operator recovery required\n')
+        LOCK_FD = lock.fileno()
         if args.command == 'status':
             active = STATE / 'active.json'
             print(active.read_text() if active.exists() else '{"phase":"idle"}')
+        elif args.command == 'recover':
+            Controller().recover(json.loads(trusted(REGISTRY).read_text()))
         else:
             if args.mode is None: p.error('switch requires a mode')
             registry = json.loads(trusted(REGISTRY).read_text())
