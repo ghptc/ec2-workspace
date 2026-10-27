@@ -120,7 +120,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_btd_packaging_and_rejection(self):
         self.metadata.write_text('set fs_game "mods/btd_alpha_001"\n')
-        for case in ('valid', 'tampered', 'path', 'missing', 'wrong_recipe'):
+        for case in ('valid', 'tampered', 'path', 'missing', 'wrong_recipe', 'missing_overlay', 'tampered_overlay'):
             with self.subTest(case=case):
                 output = self.root / case
                 headers = output / 'integrity/addiwdheaders'
@@ -133,17 +133,27 @@ class PackagingTests(unittest.TestCase):
                 assets = ('mod.ff', 'btd_images.iwd', 'btd_music.iwd', 'btd_weapons.iwd', 'btd_settings.cfg')
                 for name in assets:
                     (mod / name).write_bytes(b'private fixture')
+                overlay = mod / 'maps/mp/gametypes/_globallogic.gsx'
+                overlay.parent.mkdir(parents=True)
+                overlay.write_bytes(b'guarded private fixture')
+                spawn = mod / 'btd_gametypes/survival/_survival_spawns.gsx'
+                spawn.parent.mkdir(parents=True)
+                spawn.write_bytes(b'initialized angles fixture')
                 (output / 'cod4x18_dedrun').write_bytes(b'engine')
                 record = {'maps': ['mp_crash', 'mp_strike'], 'asset_type': 'btd-alpha-001',
                           'fs_game': 'mods/btd_alpha_001',
                           'binary_sha256': modes.digest(output / 'cod4x18_dedrun'),
                           'headers': {n: modes.digest(headers / n) for n in names},
                           'assets': {n: modes.digest(mod / n) for n in assets},
-                          'default_cfgs': ['btd_settings.cfg']}
+                          'default_cfgs': ['btd_settings.cfg'],
+                          'overlays': {'maps/mp/gametypes/_globallogic.gsx': modes.digest(overlay),
+                                       'btd_gametypes/survival/_survival_spawns.gsx': modes.digest(spawn)}}
                 if case == 'tampered': (mod / 'mod.ff').write_bytes(b'changed')
                 if case == 'path': record['default_cfgs'] = ['../server.cfg']
                 if case == 'missing': record['assets'].pop('btd_weapons.iwd')
                 if case == 'wrong_recipe': record['asset_type'] = 'unknown'
+                if case == 'missing_overlay': overlay.unlink()
+                if case == 'tampered_overlay': overlay.write_bytes(b'changed')
                 (output / 'inputs.json').write_text(json.dumps(record))
                 if case != 'valid':
                     with self.assertRaises(ValueError):
