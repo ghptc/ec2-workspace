@@ -155,9 +155,73 @@ class Controller:
         with archive.open('xb') as stream:
             os.fchmod(stream.fileno(), 0o600)
             with tarfile.open(fileobj=stream, mode='w:gz', dereference=False) as tar:
-                tar.add(source, arcname='production/home')
+                self.archive_home(tar, source)
             stream.flush(); os.fsync(stream.fileno())
         with tarfile.open(archive, 'r:gz') as tar: self.validate_members(tar.getmembers())
+
+    @staticmethod
+    def archive_home(tar, source):
+        """Read game-owned entries through checked descriptors, never path reopens.
+
+        The game may replace a file or directory while this root process reads
+        it. lstat followed by tar.add is unsafe even with dereference=False:
+        tarfile later opens the pathname and can follow a replacement symlink.
+        Each child lookup stays relative to an already-open directory; every
+        regular-file byte comes from its O_NOFOLLOW descriptor. A replacement
+        before open fails closed; a replacement after open cannot redirect it.
+        """
+        def identity(metadata):
+            return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+        def member(name, metadata):
+            info = tarfile.TarInfo(name)
+            info.mode = stat.S_IMODE(metadata.st_mode)
+            info.uid, info.gid = metadata.st_uid, metadata.st_gid
+            info.mtime = metadata.st_mtime
+            return info
+
+        def directory(descriptor, name, metadata):
+            info = member(name, metadata); info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+            for child in sorted(os.listdir(descriptor)):
+                before = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+                archive_name = name + '/' + child
+                if stat.S_ISLNK(before.st_mode):
+                    target = os.readlink(child, dir_fd=descriptor)
+                    after = os.stat(child, dir_fd=descriptor, follow_symlinks=False)
+                    if identity(before) != identity(after) or before.st_ctime_ns != after.st_ctime_ns:
+                        raise ValueError('Private snapshot entry changed')
+                    info = member(archive_name, before)
+                    info.type, info.linkname = tarfile.SYMTYPE, target
+                    tar.addfile(info)
+                    continue
+                if not (stat.S_ISREG(before.st_mode) or stat.S_ISDIR(before.st_mode)):
+                    raise ValueError('Special private snapshot entry')
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                if stat.S_ISDIR(before.st_mode): flags |= os.O_DIRECTORY
+                child_fd = os.open(child, flags, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child_fd)
+                    if identity(before) != identity(opened):
+                        raise ValueError('Private snapshot entry changed')
+                    if stat.S_ISDIR(opened.st_mode):
+                        directory(child_fd, archive_name, opened)
+                    else:
+                        info = member(archive_name, opened)
+                        info.type, info.size = tarfile.REGTYPE, opened.st_size
+                        # Duplicate the checked descriptor, not its pathname.
+                        # Copy each regular inode independently; never resolve
+                        # a hardlink supplied by the untrusted directory tree.
+                        with os.fdopen(os.dup(child_fd), 'rb') as stream:
+                            tar.addfile(info, stream)
+                finally:
+                    os.close(child_fd)
+
+        root_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            directory(root_fd, 'production/home', os.fstat(root_fd))
+        finally:
+            os.close(root_fd)
 
     def apply(self, config):
         self.audit_sequence += 1
