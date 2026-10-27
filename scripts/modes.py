@@ -137,6 +137,29 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             raise ValueError('Killhouse requires verified BTD navigation preparation')
         elif (destination / 'svr/pezbot.gsx').exists() or (destination / 'svr/pezbot.gsx').is_symlink():
             raise ValueError('Undeclared BTD navigation overlay')
+        allied_sources = {
+            'death_callback_source_sha256': 'b6ca82d2d1f8dcd0c454d5e193f54ce1c1147619d547cba4472bbe00bfa60861',
+            'spawn_points_source_sha256': 'b351917eb399ffbd3e4a93551d0bb8e62954414ea6b1659ff3b4d83becdc7408',
+            'allied_survival_source_sha256': '197c86b48d3c11cf7ab2cda46b7d692dce071c1cebc2b73fa4f02830dda6eb11',
+            'allied_zombie_source_sha256': '0e1713b629a8e9b79fae09161a18193eb3e5cdcc63c301a6650ddb519ceb39c8',
+        }
+        if 'allied_bots' in record:
+            if record['allied_bots'] is not True or 'navigation_source_sha256' not in record:
+                raise ValueError('Explicit verified BTD allied preparation required')
+            if any(record.get(name) != expected for name, expected in allied_sources.items()):
+                raise ValueError('Unsupported BTD allied source identity')
+            overlay_names.update({'btd_allies.gsx',
+                                  'btd_gametypes/survival/_survival_logic.gsx',
+                                  'k3/_zombie.gsx'})
+        elif any(name in record for name in ('allied_survival_source_sha256', 'allied_zombie_source_sha256')):
+            raise ValueError('Undeclared BTD allied source identities')
+        # Extra source files can override fastfile scripts even when omitted from
+        # the manifest. Do not package undeclared code or follow private links.
+        for path in destination.rglob('*'):
+            if path.is_symlink():
+                raise ValueError('Symlinked BTD runtime entry')
+            if path.is_file() and path.suffix.lower() in ('.gsc', '.gsx') and str(path.relative_to(destination)) not in overlay_names:
+                raise ValueError('Undeclared BTD source overlay')
         overlays = record.get('overlays', {})
         if set(overlays) != overlay_names:
             raise ValueError('Verified BTD death, spawn and declared navigation overlays required')

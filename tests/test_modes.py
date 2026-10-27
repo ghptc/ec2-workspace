@@ -126,8 +126,16 @@ class PackagingTests(unittest.TestCase):
                             'tampered_navigation', 'bad_navigation_hash', 'null_navigation_hash',
                             'symlink_navigation', 'symlink_navigation_parent', 'navigation_extra_overlay',
                             'undeclared_navigation'}
+        allied_cases = {'valid_allied', 'allied_missing_declaration', 'allied_undeclared_files', 'allied_false_declaration',
+                        'allied_string_declaration', 'allied_missing_navigation',
+                        'allied_missing_survival_hash', 'allied_bad_zombie_hash',
+                        'allied_bad_death_hash', 'allied_bad_spawn_hash',
+                        'allied_missing_adapter', 'allied_missing_survival', 'allied_missing_zombie',
+                        'allied_tampered_adapter', 'allied_tampered_survival', 'allied_tampered_zombie',
+                        'allied_undeclared_source', 'allied_extra_manifest', 'allied_symlink_adapter'}
         cases = ('valid', 'tampered', 'path', 'missing', 'wrong_recipe', 'missing_overlay',
-                 'tampered_overlay', 'extra_overlay', 'legacy_killhouse', *sorted(navigation_cases))
+                 'tampered_overlay', 'extra_overlay', 'undeclared_source', 'legacy_killhouse',
+                 *sorted(navigation_cases | allied_cases))
         for case in cases:
             with self.subTest(case=case):
                 self.server.write_text(original_server)
@@ -159,7 +167,7 @@ class PackagingTests(unittest.TestCase):
                           'default_cfgs': ['btd_settings.cfg'],
                           'overlays': {'maps/mp/gametypes/_globallogic.gsx': modes.digest(overlay),
                                        'btd_gametypes/survival/_survival_spawns.gsx': modes.digest(spawn)}}
-                if case in navigation_cases:
+                if case in navigation_cases | allied_cases:
                     navigation = mod / 'svr/pezbot.gsx'
                     navigation.parent.mkdir()
                     navigation.write_bytes(b'map-specific terminal sentinel fixture')
@@ -181,7 +189,49 @@ class PackagingTests(unittest.TestCase):
                         target = output / 'external-svr'
                         navigation.parent.rename(target)
                         navigation.parent.symlink_to(target, target_is_directory=True)
-                if case in ('extra_overlay', 'navigation_extra_overlay'):
+                if case in allied_cases:
+                    allied_paths = {'adapter': 'btd_allies.gsx',
+                                    'survival': 'btd_gametypes/survival/_survival_logic.gsx',
+                                    'zombie': 'k3/_zombie.gsx'}
+                    for name in allied_paths.values():
+                        path = mod / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b'private allied fixture')
+                        record['overlays'][name] = modes.digest(path)
+                    record.update(allied_bots=True,
+                        death_callback_source_sha256='b6ca82d2d1f8dcd0c454d5e193f54ce1c1147619d547cba4472bbe00bfa60861',
+                        spawn_points_source_sha256='b351917eb399ffbd3e4a93551d0bb8e62954414ea6b1659ff3b4d83becdc7408',
+                        allied_survival_source_sha256='197c86b48d3c11cf7ab2cda46b7d692dce071c1cebc2b73fa4f02830dda6eb11',
+                        allied_zombie_source_sha256='0e1713b629a8e9b79fae09161a18193eb3e5cdcc63c301a6650ddb519ceb39c8')
+                    if case == 'allied_missing_declaration': record.pop('allied_bots')
+                    if case == 'allied_undeclared_files':
+                        for field in ('allied_bots', 'allied_survival_source_sha256', 'allied_zombie_source_sha256'):
+                            record.pop(field)
+                        for name in allied_paths.values(): record['overlays'].pop(name)
+                    if case == 'allied_false_declaration': record['allied_bots'] = False
+                    if case == 'allied_string_declaration': record['allied_bots'] = 'true'
+                    if case == 'allied_missing_navigation':
+                        record.pop('navigation_source_sha256')
+                        record['overlays'].pop('svr/pezbot.gsx')
+                        navigation.unlink()
+                    if case == 'allied_missing_survival_hash': record.pop('allied_survival_source_sha256')
+                    for short in ('zombie', 'death', 'spawn'):
+                        if case == 'allied_bad_' + short + '_hash':
+                            field = {'zombie': 'allied_zombie_source_sha256', 'death': 'death_callback_source_sha256',
+                                     'spawn': 'spawn_points_source_sha256'}[short]
+                            record[field] = '0' * 64
+                    for short, name in allied_paths.items():
+                        path = mod / name
+                        if case == 'allied_missing_' + short: path.unlink()
+                        if case == 'allied_tampered_' + short: path.write_bytes(b'changed')
+                    if case == 'allied_symlink_adapter':
+                        path = mod / allied_paths['adapter']
+                        target = output / 'external-adapter'
+                        path.rename(target)
+                        path.symlink_to(target)
+                if case in ('undeclared_source', 'allied_undeclared_source'):
+                    (mod / 'extra.gsc').write_bytes(b'undeclared source')
+                if case in ('extra_overlay', 'navigation_extra_overlay', 'allied_extra_manifest'):
                     extra = mod / 'extra.gsx'
                     extra.write_bytes(b'unreviewed fixture')
                     record['overlays']['extra.gsx'] = modes.digest(extra)
@@ -192,7 +242,7 @@ class PackagingTests(unittest.TestCase):
                 if case == 'missing_overlay': overlay.unlink()
                 if case == 'tampered_overlay': overlay.write_bytes(b'changed')
                 (output / 'inputs.json').write_text(json.dumps(record))
-                if case not in ('valid', 'valid_navigation', 'navigation_killhouse'):
+                if case not in ('valid', 'valid_navigation', 'navigation_killhouse', 'valid_allied'):
                     with self.assertRaises(ValueError):
                         modes.package(self.root, 'promod', output, 'engine', 'config', 'none')
                     self.assertFalse((output / 'configuration').exists())
