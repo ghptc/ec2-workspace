@@ -1,5 +1,9 @@
 # CoD4 remote operations
 
+The [October 27 incident correction and restricted mode-controller runbook](docs/zombies-recovery-and-modes.md)
+records the reproduced death/wave defects, qualification gates and root-only host
+CLI. RCON activation remains disabled; production stays on the recovered Promod image.
+
 See [master deployment and Zombies readiness](docs/zombies-readiness.md) for
 required GitHub checks, local evidence and real-client qualification blockers.
 The current [mission matrix](docs/zombies-mission.md),

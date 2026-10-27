@@ -125,6 +125,19 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             path = destination / name
             if path.is_symlink() or digest(path) != expected:
                 raise ValueError(f'BTD asset identity mismatch: {name}')
+        overlay_names = {'maps/mp/gametypes/_globallogic.gsx',
+                         'btd_gametypes/survival/_survival_spawns.gsx'}
+        overlays = record.get('overlays', {})
+        if set(overlays) != overlay_names:
+            raise ValueError('Verified BTD death and spawn overlays required')
+        for name, expected in overlays.items():
+            overlay = destination / name
+            if overlay.is_symlink() or not overlay.is_file() or any(
+                parent.is_symlink() for parent in overlay.parents if parent != destination.parent
+            ):
+                raise ValueError('Verified BTD source overlay required')
+            if digest(overlay) != expected:
+                raise ValueError('BTD source overlay identity mismatch')
         defaults = record.get('default_cfgs', [])
         if not defaults or len(defaults) != len(set(defaults)) or any(
             not re.fullmatch(r'btd_[a-z]+\.cfg', name) or name not in assets for name in defaults
