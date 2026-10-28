@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import modes
@@ -118,6 +119,7 @@ class CatalogTests(unittest.TestCase):
 class PackagingTests(unittest.TestCase):
     setUp = CatalogTests.setUp
 
+    @patch.object(modes, 'BTD_AMMO_SHA256', hashlib.sha256(b'ammo first-use safety fixture').hexdigest())
     def test_btd_packaging_and_rejection(self):
         self.metadata.write_text('set fs_game "mods/btd_alpha_001"\n')
         original_server = self.server.read_text()
@@ -133,10 +135,12 @@ class PackagingTests(unittest.TestCase):
                         'allied_missing_ammo', 'allied_tampered_ammo', 'allied_missing_ammo_manifest',
                         'allied_bad_death_hash', 'allied_bad_spawn_hash',
                         'allied_missing_adapter', 'allied_missing_survival', 'allied_missing_zombie',
-                        'allied_tampered_adapter', 'allied_tampered_survival', 'allied_tampered_zombie',
+                        'allied_rehashed_ammo', 'allied_tampered_adapter', 'allied_tampered_survival', 'allied_tampered_zombie',
                         'allied_undeclared_source', 'allied_extra_manifest', 'allied_symlink_adapter'}
         cases = ('valid', 'tampered', 'path', 'missing', 'wrong_recipe', 'missing_overlay',
                  'tampered_overlay', 'extra_overlay', 'undeclared_source', 'legacy_killhouse',
+                 'missing_ammo', 'tampered_ammo', 'bad_ammo_source', 'missing_ammo_source',
+                 'missing_ammo_overlay', 'rehashed_ammo', 'symlink_ammo', 'symlink_ammo_parent',
                  *sorted(navigation_cases | allied_cases))
         for case in cases:
             with self.subTest(case=case):
@@ -160,8 +164,11 @@ class PackagingTests(unittest.TestCase):
                 spawn = mod / 'btd_gametypes/survival/_survival_spawns.gsx'
                 spawn.parent.mkdir(parents=True)
                 spawn.write_bytes(b'initialized angles fixture')
+                ammo = mod / 'btd_general/_ammo_drops.gsx'
+                ammo.parent.mkdir()
+                ammo.write_bytes(b'ammo first-use safety fixture')
                 (output / 'cod4x18_dedrun').write_bytes(b'engine')
-                record = {'maps': ['mp_crash', 'mp_strike', 'mp_killhouse'], 'asset_type': 'btd-alpha-001',
+                record = {'allied_ammo_source_sha256': '545021b1444b643d270db77fad21767368b94c439a560dd739ed6de6d321b7ad', 'maps': ['mp_crash', 'mp_strike', 'mp_killhouse'], 'asset_type': 'btd-alpha-001',
                           'fs_game': 'mods/btd_alpha_001',
                           'binary_sha256': modes.digest(output / 'cod4x18_dedrun'),
                           'headers': {n: modes.digest(headers / n) for n in names},
@@ -169,6 +176,23 @@ class PackagingTests(unittest.TestCase):
                           'default_cfgs': ['btd_settings.cfg'],
                           'overlays': {'maps/mp/gametypes/_globallogic.gsx': modes.digest(overlay),
                                        'btd_gametypes/survival/_survival_spawns.gsx': modes.digest(spawn)}}
+                record['overlays']['btd_general/_ammo_drops.gsx'] = modes.digest(ammo)
+                if case == 'missing_ammo': ammo.unlink()
+                if case == 'tampered_ammo': ammo.write_bytes(b'changed')
+                if case == 'rehashed_ammo':
+                    ammo.write_bytes(b'changed')
+                    record['overlays']['btd_general/_ammo_drops.gsx'] = modes.digest(ammo)
+                if case == 'symlink_ammo':
+                    target = output / 'external-ammo'
+                    ammo.rename(target)
+                    ammo.symlink_to(target)
+                if case == 'symlink_ammo_parent':
+                    target = output / 'external-ammo-directory'
+                    ammo.parent.rename(target)
+                    ammo.parent.symlink_to(target, target_is_directory=True)
+                if case == 'bad_ammo_source': record['allied_ammo_source_sha256'] = '0' * 64
+                if case == 'missing_ammo_source': record.pop('allied_ammo_source_sha256')
+                if case == 'missing_ammo_overlay': record['overlays'].pop('btd_general/_ammo_drops.gsx')
                 if case in navigation_cases | allied_cases:
                     navigation = mod / 'svr/pezbot.gsx'
                     navigation.parent.mkdir()
@@ -199,7 +223,7 @@ class PackagingTests(unittest.TestCase):
                     for name in allied_paths.values():
                         path = mod / name
                         path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(b'private allied fixture')
+                        path.write_bytes(b'ammo first-use safety fixture' if name == allied_paths['ammo'] else b'private allied fixture')
                         record['overlays'][name] = modes.digest(path)
                     record.update(allied_bots=True,
                         death_callback_source_sha256='b6ca82d2d1f8dcd0c454d5e193f54ce1c1147619d547cba4472bbe00bfa60861',
@@ -237,6 +261,9 @@ class PackagingTests(unittest.TestCase):
                         path = mod / name
                         if case == 'allied_missing_' + short: path.unlink()
                         if case == 'allied_tampered_' + short: path.write_bytes(b'changed')
+                    if case == 'allied_rehashed_ammo':
+                        ammo.write_bytes(b'changed')
+                        record['overlays'][allied_paths['ammo']] = modes.digest(ammo)
                     if case == 'allied_symlink_adapter':
                         path = mod / allied_paths['adapter']
                         target = output / 'external-adapter'

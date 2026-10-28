@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import shutil
 
+BTD_AMMO_SHA256 = '2b06adeb720eb54320313d0ab85b1e08bfe61baca79da8c413097e93617b2bb0'
+
 ID = r'[a-z][a-z0-9-]*'
 FS_GAME = r'(?:mods/[A-Za-z0-9_-]+)?'
 SETTING = re.compile(r'set ([A-Za-z_][A-Za-z0-9_]*) "([^"\\;\x00-\x1f\x7f]*)"')
@@ -151,7 +153,8 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             path = destination / name
             if path.is_symlink() or digest(path) != expected:
                 raise ValueError(f'BTD asset identity mismatch: {name}')
-        overlay_names = {'maps/mp/gametypes/_globallogic.gsx',
+        overlay_names = {'btd_general/_ammo_drops.gsx',
+                         'maps/mp/gametypes/_globallogic.gsx',
                          'btd_gametypes/survival/_survival_spawns.gsx'}
         if 'navigation_source_sha256' in record:
             # The navigation overlay is generated from this pinned private BTD
@@ -178,7 +181,7 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             overlay_names.update({'btd_allies.gsx',
                                   'btd_gametypes/survival/_survival_logic.gsx',
                                   'k3/_zombie.gsx', 'btd_general/_ammo_drops.gsx'})
-        elif any(name in record for name in ('allied_survival_source_sha256', 'allied_zombie_source_sha256', 'allied_ammo_source_sha256')):
+        elif any(name in record for name in ('allied_survival_source_sha256', 'allied_zombie_source_sha256')):
             raise ValueError('Undeclared BTD allied source identities')
         # Extra source files can override fastfile scripts even when omitted from
         # the manifest. Do not package undeclared code or follow private links.
@@ -187,9 +190,13 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
                 raise ValueError('Symlinked BTD runtime entry')
             if path.is_file() and path.suffix.lower() in ('.gsc', '.gsx') and str(path.relative_to(destination)) not in overlay_names:
                 raise ValueError('Undeclared BTD source overlay')
+        if record.get('allied_ammo_source_sha256') != '545021b1444b643d270db77fad21767368b94c439a560dd739ed6de6d321b7ad':
+            raise ValueError('Verified BTD ammo safety source identity required')
         overlays = record.get('overlays', {})
+        if overlays.get('btd_general/_ammo_drops.gsx') != BTD_AMMO_SHA256:
+            raise ValueError('Reviewed BTD ammo safety override hash required')
         if set(overlays) != overlay_names:
-            raise ValueError('Verified BTD death, spawn and declared navigation overlays required')
+            raise ValueError('Verified BTD death, spawn, ammo and declared navigation overlays required')
         for name, expected in overlays.items():
             overlay = destination / name
             if overlay.is_symlink() or not overlay.is_file() or any(
