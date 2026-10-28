@@ -2,7 +2,9 @@
 
 The [October 27 incident correction and restricted mode-controller runbook](docs/zombies-recovery-and-modes.md)
 records the reproduced death/wave defects, qualification gates and root-only host
-CLI. RCON activation remains disabled; production stays on the recovered Promod image.
+CLI. The [authenticated bridge runbook](docs/authenticated-mode-bridge.md) documents
+the new opt-in implementation. It remains uninstalled/disabled; production stays
+on its current known-good image.
 
 See [master deployment and Zombies readiness](docs/zombies-readiness.md) for
 required GitHub checks, local evidence and real-client qualification blockers.
@@ -322,6 +324,10 @@ engine may retain the original read-only updater delay. These changes do not
 authorize deployment or any production/homolog/Bard service action.
 
 ## Before the Dawn packaging and RCON switching design
+
+The implemented, gated bridge is documented in
+[authenticated-mode-bridge.md](docs/authenticated-mode-bridge.md). Historical
+design decisions below retain their original qualification scope.
 
 Status: private original-file packaging and master-based image preparation are supported; RCON activation remains disabled. A catalog entry is not an approved artifact.
 The companion engine command is an administrative **preflight only** and reports

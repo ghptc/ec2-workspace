@@ -37,6 +37,7 @@ class Fake(m.Controller):
     def image(self, record, mode):
         return {'io.cod4.config.hash': 'fixture'}, (m.MODES[mode][0], 'mp_crash', 'mp_crash', '12')
     def backup_private(self, config, operation): pass
+    def restore_private(self, config, operation): self.restored = True
     def apply(self, config):
         self.applied.append(copy.deepcopy(config)); self.config=copy.deepcopy(config)
     def verify(self, config, mode, record, operation):
@@ -124,7 +125,6 @@ class Authorization(unittest.TestCase):
         for key in good:
             with self.assertRaises(ValueError):m.Controller.status_values({**good,key:''},'zombies')
 
-if __name__ == '__main__': unittest.main()
 
 class Concurrency(unittest.TestCase):
     def test_host_lock_rejects_second_operator_before_registry_or_apply(self):
@@ -133,7 +133,7 @@ class Concurrency(unittest.TestCase):
             state=Path(d)
             with (state/'transition.lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                with patch.object(m,'STATE',state), patch.object(m.os,'geteuid',return_value=0), patch.object(m,'trusted'), patch.object(m.sys,'argv',['controller','switch','zombies']), patch.object(m,'primitive') as apply:
+                with patch.object(m,'STATE',state), patch.object(m,'DEPLOY_LOCK',state/'transition.lock'), patch.object(m.os,'geteuid',return_value=0), patch.object(m,'trusted', side_effect=lambda path, **kwargs:path), patch.object(m.sys,'argv',['controller','switch','zombies']), patch.object(m,'primitive') as apply:
                     with self.assertRaises(SystemExit) as error: m.main()
                     self.assertEqual(error.exception.code,2)
                     apply.assert_not_called()
@@ -181,3 +181,168 @@ class DockerVerification(unittest.TestCase):
                 with self.assertRaises(RuntimeError):c.transition('zombies',{})
             journal=json.loads((Path(d)/'active.json').read_text())
             self.assertEqual([e['phase'] for e in journal['events']],['pending','verifying','rolling_back','rolled_back'])
+
+class PrivateRollback(unittest.TestCase):
+    def test_actual_private_bytes_and_links_are_restored(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); state=root/'state';state.mkdir();home=root/'home';home.mkdir()
+            (home/'private.cfg').write_text('original-private-fixture')
+            (home/'relative').symlink_to('private.cfg')
+            operation='a'*32
+            with tarfile.open(state/(operation+'-private.tar.gz'),'w:gz',dereference=False) as tar:
+                tar.add(home,arcname='production/home')
+            (home/'private.cfg').write_text('changed');(home/'extra').write_text('target-state')
+            m.Controller(state).extract_home(home,operation)
+            self.assertEqual((home/'private.cfg').read_text(),'original-private-fixture')
+            self.assertEqual((home/'relative').readlink(),Path('private.cfg'))
+            self.assertFalse((home/'extra').exists())
+            failed=list(state.glob('*-failed-home-*'));self.assertEqual(len(failed),1)
+            self.assertEqual((failed[0]/'private.cfg').read_text(),'changed')
+
+    def test_archive_cannot_write_through_links_or_paths(self):
+        import io,tarfile
+        for unsafe in ('../escape','production/home/link/file','production/home/./link/file'):
+            with self.subTest(path=unsafe),tempfile.TemporaryDirectory() as d:
+                root=Path(d);state=root/'state';state.mkdir();home=root/'home';home.mkdir();outside=root/'outside';outside.mkdir()
+                operation='b'*32
+                with tarfile.open(state/(operation+'-private.tar.gz'),'w:gz') as tar:
+                    link=tarfile.TarInfo('production/home/link');link.type=tarfile.SYMTYPE;link.linkname=str(outside);tar.addfile(link)
+                    file=tarfile.TarInfo(unsafe);file.size=4;tar.addfile(file,io.BytesIO(b'evil'))
+                with self.assertRaises(ValueError):m.Controller(state).extract_home(home,operation)
+                self.assertFalse((outside/'file').exists());self.assertTrue(home.is_dir())
+
+class Recovery(unittest.TestCase):
+    def test_interrupted_apply_restores_only_previous_runtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=Path(d);controller=Fake(state)
+            original=controller.apply
+            def interrupted(config):
+                original(config)
+                raise KeyboardInterrupt()
+            controller.apply=interrupted
+            records={'promod':{'image':OLD},'zombies':{'image':NEW}}
+            with patch.object(m,'qualification',return_value=records):
+                with self.assertRaises(KeyboardInterrupt):controller.transition('zombies',{})
+                controller.apply=original
+                with patch.object(m,'rollback_qualification',return_value=records['promod']): controller.recover({})
+            self.assertEqual([v['services']['cod4']['image'] for v in controller.applied],[NEW,OLD])
+            self.assertEqual(controller.config,baseline())
+            self.assertEqual(json.loads((state/'active.json').read_text())['phase'],'rolled_back')
+
+    def test_notification_failure_never_applies(self):
+        with tempfile.TemporaryDirectory() as d:
+            controller=Fake(Path(d));records={'promod':{'image':OLD},'zombies':{'image':NEW}}
+            with patch.object(m,'qualification',return_value=records):
+                controller.transition('zombies',{},on_ready=lambda tx:False)
+            self.assertFalse(controller.applied)
+            self.assertEqual(json.loads((Path(d)/'active.json').read_text())['phase'],'denied')
+
+
+class SafePrivateSnapshot(unittest.TestCase):
+    """Synthetic host sentinels only; no Docker or privileged fixture paths."""
+    def fixture(self, root):
+        home = root/'home'; home.mkdir()
+        state = root/'state'; state.mkdir()
+        outside = root/'host-only'; outside.mkdir()
+        (outside/'sentinel').write_bytes(b'synthetic-host-only-content')
+        c = m.Controller(state); c.private_home = home
+        return c, home, outside
+
+    def archive(self, c, home):
+        import tarfile
+        archive = c.state/'snapshot.tar'
+        with tarfile.open(archive, 'w', dereference=False) as tar:
+            c.archive_home(tar, home)
+        with tarfile.open(archive) as tar:
+            c.validate_members(tar.getmembers())
+            return {member.name: tar.extractfile(member).read()
+                    for member in tar.getmembers() if member.isfile()}
+
+    def test_file_replaced_with_outside_symlink_before_open_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            c, home, outside = self.fixture(Path(d))
+            victim = home/'regular.cfg'; victim.write_bytes(b'original')
+            original = m.os.stat
+            def raced(name, *args, **kwargs):
+                result = original(name, *args, **kwargs)
+                if name == 'regular.cfg' and kwargs.get('dir_fd') is not None:
+                    victim.unlink(); victim.symlink_to(outside/'sentinel')
+                return result
+            with patch.object(m.os, 'stat', side_effect=raced):
+                with self.assertRaises((OSError, ValueError)):
+                    self.archive(c, home)
+
+    def test_parent_directory_replaced_with_outside_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            c, home, outside = self.fixture(Path(d))
+            victim = home/'nested'; victim.mkdir()
+            (victim/'regular.cfg').write_bytes(b'original')
+            original = m.os.stat
+            def raced(name, *args, **kwargs):
+                result = original(name, *args, **kwargs)
+                if name == 'nested' and kwargs.get('dir_fd') is not None:
+                    victim.rename(home/'moved'); victim.symlink_to(outside, target_is_directory=True)
+                return result
+            with patch.object(m.os, 'stat', side_effect=raced):
+                with self.assertRaises((OSError, ValueError)):
+                    self.archive(c, home)
+
+    def test_fifo_replacement_cannot_block_or_be_archived(self):
+        with tempfile.TemporaryDirectory() as d:
+            c, home, _ = self.fixture(Path(d))
+            victim = home/'regular.cfg'; victim.write_bytes(b'original')
+            original = m.os.stat
+            def raced(name, *args, **kwargs):
+                result = original(name, *args, **kwargs)
+                if name == 'regular.cfg' and kwargs.get('dir_fd') is not None:
+                    victim.unlink(); m.os.mkfifo(victim)
+                return result
+            with patch.object(m.os, 'stat', side_effect=raced):
+                with self.assertRaises(ValueError):
+                    self.archive(c, home)
+
+    def test_replacement_after_open_cannot_redirect_checked_descriptor(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            c, home, outside = self.fixture(Path(d))
+            victim = home/'regular.cfg'; victim.write_bytes(b'original')
+            original = tarfile.TarFile.addfile
+            def raced(tar, info, fileobj=None):
+                if info.name == 'production/home/regular.cfg':
+                    victim.unlink(); victim.symlink_to(outside/'sentinel')
+                return original(tar, info, fileobj)
+            with patch.object(tarfile.TarFile, 'addfile', raced):
+                result = self.archive(c, home)
+            self.assertEqual(result, {'production/home/regular.cfg': b'original'})
+
+    def test_normal_private_bytes_metadata_and_symlinks_survive_rollback(self):
+        import os
+        import stat
+        import tarfile
+        with tempfile.TemporaryDirectory() as d:
+            c, home, outside = self.fixture(Path(d))
+            nested = home/'nested'; nested.mkdir()
+            victim = nested/'private.cfg'; victim.write_bytes(b'original-private-fixture')
+            victim.chmod(0o640)
+            (home/'relative').symlink_to('nested/private.cfg')
+            (home/'absolute').symlink_to(outside/'sentinel')
+            os.link(victim, home/'same-bytes')
+            operation = 'a'*32
+            config = {'services': {'cod4': {'volumes': [{'target': m.runtime.PERSISTENT_HOME,
+                       'type': 'bind', 'source': str(home)}]}}}
+            with patch.object(m, 'trusted', side_effect=lambda path, directory=False: path):
+                c.backup_private(config, operation)
+            with tarfile.open(c.state/(operation+'-private.tar.gz')) as tar:
+                regular = [member for member in tar.getmembers() if member.isfile()]
+                self.assertNotIn(b'synthetic-host-only-content', [tar.extractfile(item).read() for item in regular])
+            victim.write_bytes(b'target-write')
+            c.extract_home(home, operation)
+            self.assertEqual(victim.read_bytes(), b'original-private-fixture')
+            self.assertEqual((home/'same-bytes').read_bytes(), b'original-private-fixture')
+            self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o640)
+            self.assertEqual((home/'relative').readlink(), Path('nested/private.cfg'))
+            self.assertEqual((home/'absolute').readlink(), outside/'sentinel')
+
+
+if __name__ == '__main__': unittest.main()
