@@ -38,6 +38,18 @@ def read_cfg(path):
     return settings, overrides
 
 
+def bot_names(path):
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 8192:
+        raise ValueError('Missing, symlinked or oversized Promod bot name pool')
+    names = path.read_text(encoding='ascii').splitlines()
+    if not names or len(names) != len({name.lower() for name in names}) or any(
+        not re.fullmatch(r'[A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*', name) or
+        len(name) > 31 for name in names
+    ):
+        raise ValueError('Invalid or duplicate Promod bot names')
+    return names
+
+
 def select(root, requested):
     if not re.fullmatch(ID, requested):
         raise ValueError('Invalid mode identifier')
@@ -81,6 +93,12 @@ def select(root, requested):
         if rotation[1] != effective['g_gametype']:
             raise ValueError('Initial game type differs from rotation')
         paths = (shared_path, metadata_path, server_path)
+        if effective.get('bot_use_names') == '1':
+            if metadata['fs_game'] != 'mods/pml220':
+                raise ValueError('Military name pool belongs to Promod')
+            names_path = directory / 'botnames.txt'
+            bot_names(names_path)
+            paths += (names_path,)
         hashes = {str(p.relative_to(root)): digest(p) for p in paths}
         fingerprint = hashlib.sha256(('\n'.join(hashes.values())+'\n').encode()).hexdigest()
         catalog[directory.name] = (metadata['fs_game'], rotation[3], fingerprint,
@@ -111,6 +129,14 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
     if fs_game == 'mods/pml220' and record.get('bot_readyup_overlay') is True:
         if not (destination / 'promod/readyup.gsx').is_file():
             raise ValueError('Promod bot Ready Up overlay missing')
+    if fs_game == 'mods/pml220' and mode_settings.get('bot_sd_objectives') == '1':
+        if record.get('sd_objectives_overlay') is not True:
+            raise ValueError('Native S&D objective preparation required')
+        for name, key in [('maps/mp/bots/sd_objectives.gsc', 'sd_objectives_sha256'),
+                          ('maps/mp/gametypes/sd.gsx', 'sd_native_overlay_sha256')]:
+            overlay = destination / name
+            if overlay.is_symlink() or not overlay.is_file() or digest(overlay) != record.get(key):
+                raise ValueError('Native S&D objective identity mismatch')
     defaults = []
     if fs_game != 'mods/pml220':
         if fs_game != 'mods/btd_alpha_001' or record.get('asset_type') != 'btd-alpha-001' or record.get('fs_game') != fs_game:
@@ -196,6 +222,17 @@ def package(root, mode_id, runtime, engine_revision, config_revision, bot_revisi
             cfg.write('\n// Verified private original BTD defaults.\n')
             for name in defaults:
                 cfg.write(f'exec {name}\n')
+    if fs_game == 'mods/pml220' and mode_settings.get('bot_use_names') == '1':
+        names = root / f'modes/{mode_id}/botnames.txt'
+        bot_names(names)
+        scriptdata = runtime / 'scriptdata'
+        if scriptdata.is_symlink():
+            raise ValueError('Symlinked scriptdata directory')
+        scriptdata.mkdir(exist_ok=True)
+        target_names = scriptdata / 'botnames.txt'
+        if target_names.is_symlink():
+            raise ValueError('Symlinked bot name pool destination')
+        shutil.copyfile(names, target_names)
     provenance = runtime / 'configuration'
     provenance.mkdir()
     shutil.copyfile(root / f'modes/{mode_id}/mode.cfg', provenance / 'mode.cfg')
