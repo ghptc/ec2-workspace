@@ -47,6 +47,9 @@ Fresh validation:
   `/tmp/btd-death-regression-ety4jf7e`, `/tmp/btd-death-regression-3yaggqzl`,
   `/tmp/btd-death-regression-8aqy2o2k`.
 - Killhouse navigation: 12 checks pass; `/tmp/btd-navigation-dwo6jlbg`.
+- Allied native gameplay: all 52 checks pass (native fire/hits, melee, waves,
+  human admission/reconnect, map transitions and restart);
+  `/tmp/btd-five-allies-b4l5cuw8`.
 - Full Zombies startup/integration: 73 checks, 16 maps and restart pass;
   `/tmp/cod4-btd-qualified-9optyvv4`.
 
